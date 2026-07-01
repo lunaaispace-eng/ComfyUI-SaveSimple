@@ -49,6 +49,11 @@ def _link_node_id(value):
     return None
 
 
+# input keys that commonly hold prompt text on encode / text / primitive nodes
+_TEXT_KEYS = ("text", "text_g", "text_l", "string", "prompt",
+              "value", "populated_text", "wildcard_text")
+
+
 def _collect_conditioning_text(prompt, start_value):
     texts = []
     seen = set()
@@ -70,12 +75,14 @@ def _collect_conditioning_text(prompt, start_value):
             return
 
         inputs = node.get("inputs", {})
-        class_type = str(node.get("class_type", ""))
-        text = inputs.get("text") if isinstance(inputs, dict) else None
-        if isinstance(text, str) and "CLIPTextEncode" in class_type:
-            add_text(text)
-
         if isinstance(inputs, dict):
+            # Grab any literal text held in a known text-bearing key. Key-name
+            # filtering keeps us from pulling in ckpt names, seeds, etc.
+            for key in _TEXT_KEYS:
+                if isinstance(inputs.get(key), str):
+                    add_text(inputs[key])
+            # Follow every linked child so a wired `text` input is traced back to
+            # the primitive / node that actually holds the literal string.
             for child in inputs.values():
                 child_id = _link_node_id(child)
                 if child_id is not None:
@@ -154,6 +161,15 @@ class SaveImageSimple:
                 "save_prompt_text": ("BOOLEAN", {
                     "default": False,
                     "tooltip": "Save readable positive/negative prompt text beside each image."}),
+                "positive_prompt": ("STRING", {
+                    "default": "", "forceInput": True,
+                    "tooltip": "Optional: wire the actual positive prompt here (e.g. from the "
+                               "LLM node). Overrides auto-extraction. Needed for LLM-generated "
+                               "prompts, which aren't recoverable from the workflow graph."}),
+                "negative_prompt": ("STRING", {
+                    "default": "", "forceInput": True,
+                    "tooltip": "Optional: wire the actual negative prompt here. Overrides "
+                               "auto-extraction."}),
                 "preview": ("BOOLEAN", {"default": True}),
             },
             "hidden": {"prompt": "PROMPT", "extra_pnginfo": "EXTRA_PNGINFO"},
@@ -166,13 +182,22 @@ class SaveImageSimple:
 
     def save(self, images, filename_prefix, format, save_metadata,
              output_path="", quality=95, webp_lossless=False, dpi=96,
-             add_timestamp=False, save_prompt_text=False, preview=True,
+             add_timestamp=False, save_prompt_text=False,
+             positive_prompt="", negative_prompt="", preview=True,
              prompt=None, extra_pnginfo=None):
         prefix = _sanitize_prefix(filename_prefix)
         out_dir = _default_output_dir()
-        positive_prompt, negative_prompt = ("", "")
+        pos, neg = ("", "")
         if save_prompt_text:
-            positive_prompt, negative_prompt = _extract_prompt_text(prompt)
+            # Positive: auto-extract from the graph as a fallback, but a wired
+            # input (e.g. live LLM output) always wins.
+            pos, _ = _extract_prompt_text(prompt)
+            if positive_prompt.strip():
+                pos = positive_prompt
+            # Negative: only ever what's explicitly wired in. No graph fallback,
+            # so a static "watermark" encode you don't care about stays out.
+            if negative_prompt.strip():
+                neg = negative_prompt
 
         # resolve target directory + whether it's inside the output dir (for preview)
         if output_path.strip():
@@ -212,10 +237,10 @@ class SaveImageSimple:
                         for k, v in extra_pnginfo.items():
                             pnginfo.add_text(k, json.dumps(v))
                     if save_prompt_text:
-                        if positive_prompt:
-                            pnginfo.add_text("positive_prompt", positive_prompt)
-                        if negative_prompt:
-                            pnginfo.add_text("negative_prompt", negative_prompt)
+                        if pos:
+                            pnginfo.add_text("positive_prompt", pos)
+                        if neg:
+                            pnginfo.add_text("negative_prompt", neg)
                 pil.save(fpath, pnginfo=pnginfo, compress_level=4, dpi=(dpi, dpi))
             elif format == "jpg":
                 pil.convert("RGB").save(fpath, quality=int(quality), dpi=(dpi, dpi))
@@ -223,7 +248,7 @@ class SaveImageSimple:
                 pil.save(fpath, quality=int(quality), lossless=bool(webp_lossless))
 
             if save_prompt_text:
-                _write_prompt_sidecar(fpath, positive_prompt, negative_prompt)
+                _write_prompt_sidecar(fpath, pos, neg)
 
             saved_paths.append(os.path.abspath(fpath))
             counter += 1
