@@ -127,7 +127,10 @@ def _write_prompt_sidecar(image_path, positive_prompt, negative_prompt):
 
 
 class SaveImageSimple:
-    CATEGORY = "Luna"
+    # Luna/Save, beside Save Video Simple. Changing CATEGORY moves the node in the
+    # add-node menu only — the node type is the class name, so existing workflows
+    # are unaffected.
+    CATEGORY = "Luna/Save"
     RETURN_TYPES = ("STRING",)
     RETURN_NAMES = ("file_path",)
     FUNCTION = "save"
