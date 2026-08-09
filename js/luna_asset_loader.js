@@ -88,9 +88,11 @@ const CSS = `
 .luna-al-warn { color:var(--luna-accent); padding:2px 4px; }
 .luna-al-card.sel { border-color:var(--luna-accent); box-shadow:0 0 0 1px var(--luna-accent) inset; }
 
-/* Resize panel. Same vocabulary as Pixaroma's Load Image (MIT): a mode row, a
-   ratio row, a snap row. Theirs edits one image so the panel is always on; ours
-   holds up to nine, so it edits whichever card is selected. */
+/* Resize panel. The state schema behind it — the key names, their defaults and
+   the JSON-blob approach — is modelled on ComfyUI-Pixaroma (MIT, Copyright (c)
+   2026 pixaroma), `nodes/_resize_helpers.py`; see the header of asset_loader.py.
+   Theirs edits one image so the panel is always on; ours holds up to nine, so it
+   edits whichever card is selected. */
 .luna-al-panel { border-top:1px solid var(--luna-border); padding-top:6px; display:flex;
                  flex-direction:column; gap:5px; }
 .luna-al-row { display:flex; gap:4px; align-items:center; flex-wrap:wrap; }

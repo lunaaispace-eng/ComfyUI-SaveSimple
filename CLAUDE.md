@@ -46,8 +46,15 @@ StylePromptLibrary, LunaBrowser; LLM_Prompt is MIT, compatible).
 
 - **ComfyUI-Pixaroma is MIT** and **ComfyUI-DaSiWa-Nodes is Apache-2.0** — safe to
   derive from with a header stating the changes, as `video_nodes.py` already does.
-  The resize state model (`mode` off/max_mp/longest_side/scale_factor, ratio
-  action, snap, allow_upscale) follows Pixaroma's `LoadImageMini` vocabulary.
+  The Asset Loader's `asset_state` schema is **derived from Pixaroma's
+  `RESIZE_DEFAULTS`** (`nodes/_resize_helpers.py`) — the key names, their defaults
+  and the JSON-blob approach, right down to a `resample` key this pack never
+  exposed. That was originally written off here as borrowing a "vocabulary", which
+  undersold it; the attribution now lives in the header of `asset_loader.py`, in
+  `README.md` and in `LUNA_ASSET_LOADER.md`.
+  **Pixaroma has pull requests disabled**, so there is no way to offer anything
+  back or ask a question. Err on the side of over-attributing: the cost is a
+  paragraph, the cost of getting it wrong is someone else's goodwill.
 - **comfyui-deno-custom-nodes and ComfyUI-KJNodes are GPL-3.0.** Copying their
   code would make this whole pack GPL-3.0 and cut it off from LLM_Prompt and the
   others, which could never take code back. Read them for reference; do not lift.

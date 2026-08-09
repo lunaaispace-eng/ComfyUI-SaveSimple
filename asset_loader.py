@@ -19,8 +19,22 @@ Ordering is the whole point. Card order here is the same order H3 numbers its
 references, so slot N is <Picture N> everywhere downstream, and the brief states
 that mapping explicitly rather than leaving a prompt writer to guess.
 
-Nothing is resized yet — that is deliberate and arrives in a later step, keeping
-Pixaroma's model of a per-image state whose mode defaults to "off".
+Per-image resize is modelled on ComfyUI-Pixaroma
+(https://github.com/pixaroma/ComfyUI-Pixaroma), MIT, Copyright (c) 2026 pixaroma.
+
+The `asset_state` schema comes from that pack's `RESIZE_DEFAULTS` in
+`nodes/_resize_helpers.py`: the key names and their defaults — `mode`
+(off | max_mp | longest_side | scale_factor), `ratio_action`, `crop_anchor`,
+`pad_color`, `snap`, `allow_upscale`, `resample` — are theirs, as is the idea of
+keeping the whole thing as a JSON state blob rather than a row of widgets. Credit
+where it is due: that design is why nine images can each carry their own settings
+without the node growing nine sets of controls.
+
+The code here was written against that schema rather than copied from it, and
+differs where this node's job differs: one state per image instead of one per
+node, `allow_upscale` defaulting to False because MiniMax H3 never upscales a
+reference, `snap` documented against H3's CANVAS_MULTIPLE of 32, and the order
+fixed as aspect -> size -> snap.
 """
 
 from __future__ import annotations

@@ -88,6 +88,13 @@ one drag from being live. Do not "fix" this by clamping `image_paths` to
 
 ## Per-image resize
 
+The state schema here is modelled on
+[ComfyUI-Pixaroma](https://github.com/pixaroma/ComfyUI-Pixaroma) (MIT, Copyright
+(c) 2026 pixaroma) — the key names, their defaults and the idea of storing the
+whole state as JSON rather than a row of widgets all come from that pack's
+`RESIZE_DEFAULTS`. It is what lets nine images each carry their own settings
+without nine sets of controls on the node.
+
 `mode` defaults to **`off`**: nothing is touched unless asked. That default is
 the point — REF2VA wants originals.
 

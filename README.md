@@ -172,6 +172,11 @@ only loaded once.
 
 See [LUNA_ASSET_LOADER.md](LUNA_ASSET_LOADER.md) for the full description.
 
+The per-image resize state is modelled on
+[ComfyUI-Pixaroma](https://github.com/pixaroma/ComfyUI-Pixaroma) by pixaroma
+(MIT) — the schema's key names, defaults and JSON-blob approach come from that
+pack. Details in the header of `asset_loader.py`.
+
 ## Outputs
 
 ```text
