@@ -100,7 +100,7 @@ function isHelpIconHit(node, pos) {
 }
 
 app.registerExtension({
-    name: "DaSiWa.EnhancedVideoCombinePreview",
+    name: "LunaSaveSimple.VideoPreview",
     async beforeRegisterNodeDef(nodeType, nodeData) {
         if (nodeData.name !== NODE_NAME) return;
 
