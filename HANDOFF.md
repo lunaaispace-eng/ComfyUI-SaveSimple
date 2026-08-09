@@ -222,6 +222,18 @@ round trip, so trust the browser, not the API surface:
 - `OUTPUT_TOOLTIPS`: shipped in `object_info`, never attached to output slots —
   true for core nodes as well. `luna_help.mjs` draws them.
 
+**A backtick in a comment inside a template literal breaks the whole file, and
+the linter will not tell you.** `luna_asset_loader.js` keeps its CSS in a
+template literal with explanatory `/* */` comments inside it. A comment written
+as ``  `nodes/_resize_helpers.py`  `` closed the CSS string; everything after it
+parsed as code, `nodes` was undefined, the module threw on import, the extension
+never registered, and the node rendered as three raw widgets with no card UI.
+
+`node --check` **passed** — the wreckage is still valid syntax. Nothing short of
+loading the page catches it. When touching that CSS block, check that the only
+backticks between `const CSS = ` and its closing delimiter are the two delimiters
+themselves, and reload the browser before believing it works.
+
 **Synthetic `PointerEvent`s do not drive widget clicks.** This frontend hit-tests
 via `getWidgetAtCursor`, which reads the live cursor, so a simulated click proves
 nothing — it "failed" while the callback worked fine. Call the handler

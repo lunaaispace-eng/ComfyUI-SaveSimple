@@ -90,9 +90,14 @@ const CSS = `
 
 /* Resize panel. The state schema behind it — the key names, their defaults and
    the JSON-blob approach — is modelled on ComfyUI-Pixaroma (MIT, Copyright (c)
-   2026 pixaroma), `nodes/_resize_helpers.py`; see the header of asset_loader.py.
+   2026 pixaroma), nodes/_resize_helpers.py; see the header of asset_loader.py.
    Theirs edits one image so the panel is always on; ours holds up to nine, so it
-   edits whichever card is selected. */
+   edits whichever card is selected.
+   NOTE: no backticks anywhere in this block. It lives inside the CSS template
+   literal, so one would close the string and turn the rest of the file into
+   code. That happened once and broke the whole extension; node --check still
+   passed, because the wreckage is still valid syntax. Only loading it catches
+   this, so check the browser, not the linter. */
 .luna-al-panel { border-top:1px solid var(--luna-border); padding-top:6px; display:flex;
                  flex-direction:column; gap:5px; }
 .luna-al-row { display:flex; gap:4px; align-items:center; flex-wrap:wrap; }
