@@ -22,7 +22,7 @@ import { registerLunaCollapse } from "./luna_collapse.mjs";
 
 // The ⓘ on the title bar. Content is each node's Python DESCRIPTION plus its
 // input tooltips, so there is no separate help file to keep up to date.
-registerLunaHelp(app, ["LunaAssetLoader", "SaveImageSimple", "SaveVideoSimple"], "LunaSaveSimple.Help");
+registerLunaHelp(app, ["LunaAssetLoader", "SaveImageSimple", "SaveVideoSimple", "LunaImagePrecision", "LunaMiniMaxH3Canvas"], "LunaSaveSimple.Help");
 
 // The chevron beside it folds the settings away, leaving sockets and whatever the
 // node draws for itself — Save Image keeps its preview, Save Video keeps the

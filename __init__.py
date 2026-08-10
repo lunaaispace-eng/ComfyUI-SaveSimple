@@ -11,6 +11,9 @@ the header of video_nodes.py for the attribution and the list of changes.
 Luna Asset Loader: one ordered set of reference images feeding both the MiniMax
 H3 reference sockets (each at its original size) and the prompt writers (as a
 conformed batch), so a picture is loaded once instead of once per consumer.
+
+Luna Image Precision: casts an IMAGE batch to fp16 or fp32, to halve what a long
+frame batch costs downstream in a node that sizes its output from the input dtype.
 """
 
 from .nodes import NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS
@@ -22,11 +25,23 @@ from .asset_loader import (
     NODE_CLASS_MAPPINGS as _LOADER_CLASS_MAPPINGS,
     NODE_DISPLAY_NAME_MAPPINGS as _LOADER_DISPLAY_MAPPINGS,
 )
+from .image_precision import (
+    NODE_CLASS_MAPPINGS as _PRECISION_CLASS_MAPPINGS,
+    NODE_DISPLAY_NAME_MAPPINGS as _PRECISION_DISPLAY_MAPPINGS,
+)
+from .h3_canvas import (
+    NODE_CLASS_MAPPINGS as _H3_CLASS_MAPPINGS,
+    NODE_DISPLAY_NAME_MAPPINGS as _H3_DISPLAY_MAPPINGS,
+)
 
 NODE_CLASS_MAPPINGS.update(_VIDEO_CLASS_MAPPINGS)
 NODE_DISPLAY_NAME_MAPPINGS.update(_VIDEO_DISPLAY_MAPPINGS)
 NODE_CLASS_MAPPINGS.update(_LOADER_CLASS_MAPPINGS)
 NODE_DISPLAY_NAME_MAPPINGS.update(_LOADER_DISPLAY_MAPPINGS)
+NODE_CLASS_MAPPINGS.update(_PRECISION_CLASS_MAPPINGS)
+NODE_DISPLAY_NAME_MAPPINGS.update(_PRECISION_DISPLAY_MAPPINGS)
+NODE_CLASS_MAPPINGS.update(_H3_CLASS_MAPPINGS)
+NODE_DISPLAY_NAME_MAPPINGS.update(_H3_DISPLAY_MAPPINGS)
 
 WEB_DIRECTORY = "./js"
 
