@@ -674,4 +674,4 @@ class SaveVideoSimple:
 
 
 NODE_CLASS_MAPPINGS = {"SaveVideoSimple": SaveVideoSimple}
-NODE_DISPLAY_NAME_MAPPINGS = {"SaveVideoSimple": "Save Video Simple"}
+NODE_DISPLAY_NAME_MAPPINGS = {"SaveVideoSimple": "Luna Save Video"}

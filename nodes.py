@@ -31,6 +31,28 @@ def _default_output_dir() -> str:
     return os.path.join(os.getcwd(), "output")
 
 
+def _format_date_tokens(text: str) -> str:
+    """Expand ComfyUI-style %date:...% placeholders.
+
+    Same tokens Save Video Simple accepts, so `video_%date:hhmmss%` and
+    `shot_%date:yyyy-MM-dd%` mean the same thing in either node. Bare `%date%`
+    falls back to yyyyMMdd_HHmmss.
+    """
+    if not text or "%date" not in text:
+        return text or ""
+    now = time.localtime()
+
+    def replace_date(match):
+        fmt = match.group(1) or "yyyyMMdd_HHmmss"
+        fmt = fmt.replace("yyyy", "%Y").replace("yy", "%y")
+        fmt = fmt.replace("MM", "%m").replace("dd", "%d").replace("DD", "%d")
+        fmt = fmt.replace("HH", "%H").replace("hh", "%H")
+        fmt = fmt.replace("mm", "%M").replace("ss", "%S")
+        return time.strftime(fmt, now)
+
+    return re.sub(r"%date(?::([^%]+))?%", replace_date, text)
+
+
 def _sanitize_prefix(prefix: str) -> str:
     prefix = (prefix or "").strip() or "ComfyUI"
     # keep it a filename, not a path
@@ -142,7 +164,11 @@ class SaveImageSimple:
         return {
             "required": {
                 "images": ("IMAGE",),
-                "filename_prefix": ("STRING", {"default": "ComfyUI"}),
+                "filename_prefix": ("STRING", {
+                    "default": "ComfyUI",
+                    "tooltip": "Filename, not a path. Accepts date tokens: "
+                               "image_%date:hhmmss%, shot_%date:yyyy-MM-dd%, or bare "
+                               "%date%. Put folders in output_path."}),
                 "format": (["png", "jpg", "webp"],),
                 "save_metadata": ("BOOLEAN", {
                     "default": True, "label_on": "yes", "label_off": "no",
@@ -153,7 +179,8 @@ class SaveImageSimple:
                 "output_path": ("STRING", {
                     "default": "",
                     "tooltip": "Empty = ComfyUI output folder. A relative name = subfolder. "
-                               "An absolute path = save there."}),
+                               "An absolute path = save there. Date tokens work here too: "
+                               "renders/%date:yyyy-MM-dd%"}),
                 "quality": ("INT", {"default": 95, "min": 1, "max": 100,
                                     "tooltip": "JPG / WEBP only."}),
                 "webp_lossless": ("BOOLEAN", {"default": False,
@@ -188,6 +215,11 @@ class SaveImageSimple:
              add_timestamp=False, save_prompt_text=False,
              positive_prompt="", negative_prompt="", preview=True,
              prompt=None, extra_pnginfo=None):
+        # Dates expand in both, so a run can be stamped in the name, the folder, or
+        # both. Folders stay output_path's job — the prefix is still basename'd, so a
+        # slash in a date pattern cannot quietly turn into a directory here.
+        filename_prefix = _format_date_tokens(filename_prefix)
+        output_path = _format_date_tokens(output_path)
         prefix = _sanitize_prefix(filename_prefix)
         out_dir = _default_output_dir()
         pos, neg = ("", "")
@@ -281,5 +313,8 @@ class SaveImageSimple:
         return mx + 1
 
 
+# Class names are frozen — they are what saved workflows store. Only the menu
+# label changes, so every node in the pack reads "Luna ..." and they group together
+# in the node search.
 NODE_CLASS_MAPPINGS = {"SaveImageSimple": SaveImageSimple}
-NODE_DISPLAY_NAME_MAPPINGS = {"SaveImageSimple": "Save Image (Simple)"}
+NODE_DISPLAY_NAME_MAPPINGS = {"SaveImageSimple": "Luna Save Image"}
