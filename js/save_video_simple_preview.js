@@ -150,7 +150,12 @@ app.registerExtension({
             // Native controls hide themselves when the pointer leaves. Toggling the
             // controls property recreates Chromium's media layer inside a DOM widget.
             preview.controls = true;
-            preview.controlsList = "nodownload nofullscreen noremoteplayback";
+            // No "nofullscreen" here: that is what left the player's fullscreen button
+            // dead. A fullscreen element goes into the browser's top layer, which is
+            // laid out against the viewport, so the transform-scaled wrapper ComfyUI
+            // puts DOM widgets in does not confine it. "nodownload" stays because the
+            // node has its own Download link, which names the file properly.
+            preview.controlsList = "nodownload noremoteplayback";
             preview.disablePictureInPicture = true;
             preview.style.cssText = "display:block;width:100%;background:#111;cursor:pointer";
 
@@ -232,13 +237,19 @@ app.registerExtension({
                     }
                 }, 2500);
             });
+            // Sound follows the pointer, except in fullscreen. Going fullscreen resizes
+            // the video out from under the cursor, which can fire mouseleave with no
+            // matching mouseenter, and a silent fullscreen video reads as broken.
+            const isFullscreen = () => document.fullscreenElement === preview;
             preview.addEventListener("mouseenter", () => {
                 preview.muted = false;
             });
             preview.addEventListener("mouseleave", () => {
-                preview.muted = true;
+                if (!isFullscreen()) preview.muted = true;
             });
-            preview.addEventListener("dblclick", (event) => event.preventDefault());
+            preview.addEventListener("fullscreenchange", () => {
+                preview.muted = !isFullscreen() && !preview.matches(":hover");
+            });
             [preview, info, actions, saveFirstFrame, saveFirstFrameLabel, saveLastFrame, saveLastFrameLabel, autoPlay, autoPlayLabel, download].forEach(stopNodeInteraction);
 
             root.append(preview, info, actions);
