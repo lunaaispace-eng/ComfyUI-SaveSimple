@@ -183,18 +183,23 @@ nodes actually process a clip.
 
 ## Next, in the order agreed
 
-1. **Drag grip to resize the preview area only** — requested twice. This does
+1. **Build Luna Media Loader** — the numbered VIDEO/AUDIO references for H3, the
+   Asset Loader's sibling. Designed 2026-08-13, agreed for the next session; the
+   full spec, the survey of what already exists and the reasoning for keeping it
+   out of the Asset Loader are in `LUNA_MEDIA_LOADER.md`. One decision is still
+   open there — the `video_previews` output — settle it before building.
+2. **Drag grip to resize the preview area only** — requested twice. This does
    **not** mean resizing the whole node. Make the dragged height an **input**
    stored on the node, never something measured from the layout (see below).
-2. **⚙ cog** for node-scoped settings: preview height, columns, defaults for newly
+3. **⚙ cog** for node-scoped settings: preview height, columns, defaults for newly
    added images. **Not** the resize panel — that is per-image and belongs with the
    selected card. Colour does **not** go in the cog; that was settled.
-3. **`Resample`** — the state key exists, is never exposed.
-4. Roll `luna_help.mjs` (and `OUTPUT_TOOLTIPS`) and `luna_collapse.mjs` into
+4. **`Resample`** — the state key exists, is never exposed.
+5. Roll `luna_help.mjs` (and `OUTPUT_TOOLTIPS`) and `luna_collapse.mjs` into
    LunaBrowser, LLM_Prompt, DeGrid, StylePromptLibrary. Pure gain: every node gets
    an ⓘ, working output hovers and a collapse chevron for one import plus a
    node-name list.
-5. **Wire the loader into the real workflow** — replaces three
+6. **Wire the loader into the real workflow** — replaces three
    `PixaromaLoadImageMini` nodes *and* `ImageBatchMulti` (node `2746` in
    `MinimaxH3T2VAR2VA.json`).
 
