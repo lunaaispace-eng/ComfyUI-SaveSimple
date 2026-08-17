@@ -39,6 +39,22 @@ chevron that folds a node's settings away). All three are registered from
 the flag alone shrinks the node. Verified in 1.48.x by zeroing `widget.last_y`,
 forcing `canvas.draw(true, true)` and seeing whether it comes back.
 
+## H3 work does not belong in this pack — 2026-08-17
+
+`Luna MiniMax H3 Canvas` left for **ComfyUI-LunaMiniMaxH3**
+(github.com/lunaaispace-eng/ComfyUI-LunaMiniMaxH3), which is now the single home for
+MiniMax H3 nodes. The class name did not change, so saved workflows resolve as soon as
+that pack is installed — but two installed copies of one class collide, so the two packs
+deploy together. The E: install was swapped in one pass.
+
+`LUNA_MEDIA_LOADER.md` stays here for now and is the exception to watch: the node it
+designs is H3's numbered video/audio references, so **build it in the H3 pack** and move
+the plan across at that point. It lives here only because it is the Asset Loader's
+sibling and reuses its patterns.
+
+The shared `js/luna_*.mjs` kit is copied into the H3 pack as well. There is no cross-pack
+import in ComfyUI's frontend, so a fix in one has to be copied to the other by hand.
+
 ## Licence — decides what may be borrowed
 
 This pack is **Apache-2.0**, the house licence for these packs (also DeGrid,
