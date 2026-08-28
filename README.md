@@ -1,8 +1,9 @@
 # ComfyUI-SaveSimple
 
-Four deliberately small nodes for ComfyUI: save an image, save a video, load a set
-of reference images once instead of once per consumer, and cast a frame batch to
-fp16. Each exists because the alternatives carried more settings than the job needs.
+Five deliberately small nodes for ComfyUI: save an image, save a video, load a set
+of reference images once instead of once per consumer, cast a frame batch to
+fp16, and strip the 2px VAE pixel grid off a decoded image. Each exists because
+the alternatives carried more settings than the job needs.
 
 | Node | Category | Class |
 | --- | --- | --- |
@@ -10,6 +11,7 @@ fp16. Each exists because the alternatives carried more settings than the job ne
 | `Luna Save Video` | `Luna/Save` | `SaveVideoSimple` |
 | `Luna Asset Loader` | `Luna/Load` | `LunaAssetLoader` |
 | `Luna Image Precision` | `Luna/Image` | `LunaImagePrecision` |
+| `VAE DeGrid (Nyquist Notch)` | `Luna/Image` | `VAEDeGrid` |
 
 Every node carries an **ⓘ** on its title bar with its own inputs and outputs
 documented, and the two save nodes carry a **chevron** that folds their settings
@@ -284,6 +286,62 @@ what the *downstream* node allocates, less the cost of the fp16 copy. In the
 
 Put it immediately before the node whose buffer you want to shrink. Casting
 earlier only makes the fp16 copy coexist with more cached fp32 batches.
+
+---
+
+# VAE DeGrid (Nyquist Notch)
+
+Removes the 2px pixel grid the Qwen Image VAE (and, less strongly, the Wan 2.1
+VAE) leaves across decoded images — affects Krea2, Qwen Image, Anima and anything
+else on those VAEs. The artifact is easy to miss at 100% but any sharpening or
+upscaling afterwards amplifies it, so wire this **straight after VAE Decode**,
+before sharpening / deconvolution / upscaling.
+
+Ported here on 2026-08-28 from the standalone `ComfyUI-DeGrid` repo, which is now
+retired — a grid fix belongs with the other post-decode / pre-save image tools.
+The class id `VAEDeGrid` is unchanged, so old workflows resolve once this pack is
+installed.
+
+## Inputs
+
+| Input | Default | Description |
+| --- | --- | --- |
+| `image` | required | Wire straight from VAE Decode. |
+| `enabled` | `on` | Off = image passes through untouched. Flip it for a quick A/B. |
+| `mode` | `auto` | **auto (recommended):** measures the grid strength per image and sets the removal limit itself. **manual:** uses the `limit` widget. Switch only if auto visibly under- or over-corrects. |
+| `limit` | `0.02` | **Manual mode only** (ignored in auto). Max per-pixel correction on the 0–1 scale. VAE grid is usually 0.005–0.02. Too low → grid survives in contrasty areas; too high → fine 2–3px texture (pores, weave) softens. |
+| `grid_gain` | `10` | Brightness amplification of the `removed_grid` preview **only** — never touches the cleaned image. |
+| `grid_view` | `4x zoom` | Framing of the `removed_grid` preview. `full frame` aliases the 2px lattice into gray noise at preview size; `4x zoom` / `8x zoom` show a magnified center crop where the pattern is visible. Preview only. |
+
+## Outputs
+
+| Output | Type | Description |
+| --- | --- | --- |
+| `image` | `IMAGE` | The degridded image, same size as the input. Send it onward to sharpening / upscaling / save. |
+| `removed_grid` | `IMAGE` | Visualization of what was subtracted (amplified, centered on gray). Uniform fine speckle = working. Recognizable faces/fabric = limit too high. |
+
+After each run the node's title bar shows a status line, e.g.
+`grid ≈ 2.10/255 — removed (limit 0.019 auto) · edges protected: 1.2%` — that is
+your confirmation it did something, no pixel-peeping needed. Below ~0.5/255 it
+reports the image as already clean.
+
+## How it works
+
+A separable Nyquist notch: a 9-tap alternating-sign binomial kernel (1D response
+sin⁸(ω/2)), combined as `center − Bx − By + Bxy`, which factors into
+`(1 − sin⁸(ωx/2))(1 − sin⁸(ωy/2))` — an exact zero for any 2px-period pattern
+(stripes or checkerboard) and exact unity at DC with an 8th-order flat zero, so
+gradients pass through without banding. The correction is then amplitude-clamped
+before subtraction, so strong real edges and legitimate fine texture pass through
+unsoftened — only the low-amplitude artifact band is removed. In `auto` the clamp
+limit is estimated per image from a robust percentile of the extracted grid
+component. Math core is [degrid_core.py](degrid_core.py) — pure torch, no ComfyUI
+imports.
+
+Based on the GLSL notch-filter approach shared by
+[u/Haiku-575 on r/StableDiffusion](https://www.reddit.com/r/StableDiffusion/comments/1umwhq7/2px_pixel_grid_on_krea2_from_vae_and_how_to/),
+reimplemented in pure PyTorch with a narrower 9-tap kernel, amplitude limiting,
+and per-image auto-calibration.
 
 ---
 

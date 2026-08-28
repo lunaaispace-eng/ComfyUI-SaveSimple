@@ -10,3 +10,7 @@ env/
 output/
 *.egg-info/
 .claude/
+
+# Local context files — not for git
+CLAUDE.md
+STATUS.md
