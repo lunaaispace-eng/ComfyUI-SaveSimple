@@ -289,9 +289,8 @@ def _format_filename_prefix(filename_prefix):
     return re.sub(r"%date(?::([^%]+))?%", replace_date, filename_prefix)
 
 
-def _output_filename(filename, counter, extension, has_audio):
-    audio_suffix = "-audio" if has_audio else ""
-    return f"{filename}_{counter:05}{audio_suffix}.{extension.lstrip('.')}"
+def _output_filename(filename, counter, extension):
+    return f"{filename}_{counter:05}.{extension.lstrip('.')}"
 
 
 def _metadata_file(prompt, extra_pnginfo):
@@ -600,7 +599,7 @@ class SaveVideoSimple:
             if animated_settings:
                 if audio_path:
                     _log(f"{container} does not support audio; connected audio is omitted.")
-                output_path = os.path.join(output_folder, _output_filename(filename, counter, animated_settings[0], False))
+                output_path = os.path.join(output_folder, _output_filename(filename, counter, animated_settings[0]))
                 encoder = _encode_animated_image(
                     ffmpeg, container, selected_bit_depth, width, height, frame_rate, frame_chunks, output_path, quality,
                     report_encode_progress,
@@ -615,7 +614,7 @@ class SaveVideoSimple:
                             _log(f"Auto test: {selected_codec}/{selected_container}.")
                         output_path = os.path.join(
                             output_folder,
-                            _output_filename(filename, counter, _CONTAINER_EXTENSIONS[selected_container], audio_path is not None),
+                            _output_filename(filename, counter, _CONTAINER_EXTENSIONS[selected_container]),
                         )
                         try:
                             encoder = _encode_with_available_encoder(
@@ -632,7 +631,7 @@ class SaveVideoSimple:
                         continue
                     break
                 else:
-                    fallback_path = os.path.join(output_folder, _output_filename(filename, counter, ".mp4", audio_path is not None))
+                    fallback_path = os.path.join(output_folder, _output_filename(filename, counter, ".mp4"))
                     encoder = _encode_with_available_encoder(
                         ffmpeg, "H.264", selected_bit_depth, width, height, frame_rate, frame_chunks,
                         fallback_path, "MP4", quality, quality, metadata_path, audio_path, audio_duration, crop_to_audio,
