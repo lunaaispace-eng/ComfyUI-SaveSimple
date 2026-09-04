@@ -22,10 +22,16 @@ import { registerLunaCollapse } from "./luna_collapse.mjs";
 
 // The ⓘ on the title bar. Content is each node's Python DESCRIPTION plus its
 // input tooltips, so there is no separate help file to keep up to date.
-registerLunaHelp(app, ["LunaAssetLoader", "SaveImageSimple", "SaveVideoSimple", "LunaImagePrecision", "VAEDeGrid"], "LunaSaveSimple.Help");
+registerLunaHelp(app, ["LunaAssetLoader", "SaveImageSimple", "SaveVideoSimple", "LunaImagePrecision", "VAEDeGrid", "LunaH3ReferenceLoader", "LunaH3RefsOut"], "LunaSaveSimple.Help");
 
 // The chevron beside it folds the settings away, leaving sockets and whatever the
 // node draws for itself — Save Image keeps its preview, Save Video keeps the
-// player, the frame checkboxes, Autoplay and Download. Only the save nodes for
-// now: the Asset Loader is cards rather than settings, so there is little to fold.
-registerLunaCollapse(app, ["SaveImageSimple", "SaveVideoSimple"], "LunaSaveSimple.Collapse");
+// player, the frame checkboxes, Autoplay and Download. The Asset Loader is not
+// listed: it is cards rather than settings, so there is little to fold.
+//
+// The H3 Reference Loader is listed because it is nothing BUT settings — 27 stock
+// widgets, 9 of them picture slots that are usually left on (none). Folding it
+// leaves the five sockets, which is all a wired graph needs to show. It is a
+// stopgap: the node deserves the Asset Loader's card treatment, and the chevron
+// only hides the problem rather than solving it.
+registerLunaCollapse(app, ["SaveImageSimple", "SaveVideoSimple", "LunaH3ReferenceLoader"], "LunaSaveSimple.Collapse");
