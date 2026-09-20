@@ -1,10 +1,16 @@
 """Luna VAE DeGrid — removes the 2px pixel grid left by the Qwen Image / Wan 2.1 VAEs.
 
 Ported into this pack on 2026-08-28 from the standalone ComfyUI-DeGrid repo
-(github.com/lunaaispace-eng/ComfyUI-DeGrid), which is now retired. The grid fix
-belongs with the other post-decode / pre-save image tools rather than in a repo
-of its own. Class id `VAEDeGrid` and the two image outputs are unchanged, so
-saved workflows keep resolving once this pack is installed.
+(github.com/lunaaispace-eng/ComfyUI-DeGrid). Class id `VAEDeGrid` and the two
+image outputs are unchanged, so saved workflows keep resolving once this pack
+is installed.
+
+**That standalone repo was un-retired on 2026-09-20 and is live again** — people
+want the one node without the rest of this suite. So the node now exists in two
+places: here as a V1 node, and there as the original V3 `io.ComfyNode`.
+`degrid_core.py` is byte-identical between them and carries all the maths; only
+this wrapper differs. **A fix to the core must be copied to both.** Both declare
+the same node id, so the two packs must never be installed side by side.
 
 The V3 `io.ComfyNode` wrapper was rewritten as a V1 node to match the rest of
 the pack — ComfyUI's loader is either/or (NODE_CLASS_MAPPINGS *or*
@@ -24,13 +30,16 @@ import torch
 from .degrid_core import degrid, NEGLIGIBLE_AMP
 
 _DESCRIPTION = (
-    "Removes the 2px pixel grid left by the Qwen Image / Wan 2.1 VAEs "
-    "(Krea2, Qwen Image, Anima...). Wire directly after VAE Decode, before any "
-    "sharpening or upscaling.\n\n"
+    "Removes the 2px pixel grid left by the Qwen Image / Qwen Image 2.1 / "
+    "Wan 2.1 VAEs (Krea2, Qwen Image, Anima...). Wire directly after VAE "
+    "Decode, before any resize, sharpening or upscaling — and before a "
+    "restorer like SeedVR2, which will otherwise treat the lattice as detail "
+    "worth reconstructing.\n\n"
     "Defaults are the zero-config path: leave mode on 'auto' and the node "
-    "measures each image and calibrates itself. After a run, the node shows the "
-    "measured grid strength, so you can see it did something even if the change "
-    "is invisible at normal zoom.\n\n"
+    "measures each image and calibrates itself. It measures the lattice "
+    "itself, not just how detailed the image is, so an image that never had a "
+    "grid is reported as clean and passed through untouched. After a run, the "
+    "node shows the measured grid strength and which orientation dominates.\n\n"
     "The removed_grid output shows WHAT was subtracted. The artifact is only "
     "2px, so in 'full frame' view it looks like faint gray noise — that is "
     "correct behavior, not a failure. Switch grid_view to 4x/8x zoom to see the "
@@ -44,9 +53,17 @@ def _status_line(mode: str, stats: list) -> str:
     lim = s["limit"]
     src = "auto" if mode == "auto" else "manual"
     if amp < NEGLIGIBLE_AMP * 255.0:
-        verdict = f"grid ≈ {amp:.2f}/255 — negligible, image already clean"
+        state = "passed through untouched" if s["skipped"] else "filtered anyway"
+        verdict = f"grid {amp:.2f}/255 — none detected, {state}"
     else:
-        verdict = f"grid ≈ {amp:.2f}/255 — removed (limit {lim:.3f} {src})"
+        # name the dominant orientation: it says which stage left the lattice
+        parts = (
+            ("checker", s["checker_255"]),
+            ("V-stripe", s["vstripe_255"]),
+            ("H-stripe", s["hstripe_255"]),
+        )
+        kind = max(parts, key=lambda p: p[1])[0]
+        verdict = f"grid {amp:.2f}/255 ({kind}) — removed (limit {lim:.3f} {src})"
     line = f"{verdict} · edges protected: {s['clipped_pct']:.1f}%"
     if len(stats) > 1:
         line += f" · batch of {len(stats)} (first shown)"
@@ -97,6 +114,17 @@ class VAEDeGrid:
                                "partially survives in contrasty areas. Too high = fine "
                                "2-3px texture (pores, fabric) gets slightly softened.",
                 }),
+                "skip_when_clean": ("BOOLEAN", {
+                    "default": True,
+                    "tooltip": "Leave the image completely untouched when no grid "
+                               "is actually there. The node measures the lattice "
+                               "directly (its phase is locked to the VAE's output "
+                               "stride, so it survives averaging while real detail "
+                               "cancels), and an image with none — anything that has "
+                               "been through an upscaler or a resize — is passed "
+                               "through bit-for-bit. Turn this off only to force the "
+                               "filter to run regardless.",
+                }),
                 "grid_gain": ("FLOAT", {
                     "default": 10.0, "min": 1.0, "max": 50.0, "step": 1.0,
                     "tooltip": "Brightness amplification of the removed_grid preview "
@@ -116,7 +144,8 @@ class VAEDeGrid:
             }
         }
 
-    def run(self, image, enabled, mode, limit, grid_gain, grid_view):
+    def run(self, image, enabled, mode, limit, grid_gain, grid_view,
+            skip_when_clean=True):
         if not enabled:
             return {
                 "ui": {"text": ("bypassed (enabled = off)",)},
@@ -124,6 +153,7 @@ class VAEDeGrid:
             }
         cleaned, vis, stats = degrid(
             image, mode=mode, limit=limit, grid_gain=grid_gain, grid_view=grid_view,
+            skip_when_clean=skip_when_clean,
         )
         return {
             "ui": {"text": (_status_line(mode, stats),)},
