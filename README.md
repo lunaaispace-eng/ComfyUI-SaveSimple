@@ -1,17 +1,24 @@
 # ComfyUI-SaveSimple
 
-Five deliberately small nodes for ComfyUI: save an image, save a video, load a set
-of reference images once instead of once per consumer, cast a frame batch to
-fp16, and strip the 2px VAE pixel grid off a decoded image. Each exists because
-the alternatives carried more settings than the job needs.
+Seven deliberately small nodes for ComfyUI: save an image, save a video, load a
+set of reference images once instead of once per consumer, feed MiniMax H3 all
+four of its reference families down one wire, cast a frame batch to fp16, and
+strip the 2px VAE pixel grid off a decoded image. Each exists because the
+alternatives carried more settings than the job needs.
 
 | Node | Category | Class |
 | --- | --- | --- |
 | `Luna Save Image` | `Luna/Save` | `SaveImageSimple` |
 | `Luna Save Video` | `Luna/Save` | `SaveVideoSimple` |
 | `Luna Asset Loader` | `Luna/Load` | `LunaAssetLoader` |
+| `Luna H3 Reference Loader` | `Luna/Load` | `LunaH3ReferenceLoader` |
+| `Luna H3 Refs Out` | `Luna/Load` | `LunaH3RefsOut` |
 | `Luna Image Precision` | `Luna/Image` | `LunaImagePrecision` |
 | `VAE DeGrid (Nyquist Notch)` | `Luna/Image` | `VAEDeGrid` |
+
+> The two **Luna H3** nodes were added on 2026-09-04 and do not have a written
+> section below yet. Each carries its own **ⓘ** panel with every input and output
+> documented, which is the authoritative description until this file catches up.
 
 Every node carries an **ⓘ** on its title bar with its own inputs and outputs
 documented, and the two save nodes carry a **chevron** that folds their settings
@@ -292,15 +299,21 @@ earlier only makes the fp16 copy coexist with more cached fp32 batches.
 # VAE DeGrid (Nyquist Notch)
 
 Removes the 2px pixel grid the Qwen Image VAE (and, less strongly, the Wan 2.1
-VAE) leaves across decoded images — affects Krea2, Qwen Image, Anima and anything
-else on those VAEs. The artifact is easy to miss at 100% but any sharpening or
-upscaling afterwards amplifies it, so wire this **straight after VAE Decode**,
-before sharpening / deconvolution / upscaling.
+VAE) leaves across decoded images — affects Krea2, Qwen Image, **Qwen Image 2.1**,
+Anima and anything else on those VAEs. The artifact is easy to miss at 100% but
+any sharpening or upscaling afterwards amplifies it, so wire this **straight
+after VAE Decode**, before any resize / sharpening / upscaling — and before a
+diffusion restorer such as SeedVR2, which reads a regular lattice as detail worth
+reconstructing. A resize will hide the grid from your eyes without removing it
+from what the restorer was handed.
 
-Ported here on 2026-08-28 from the standalone `ComfyUI-DeGrid` repo, which is now
-retired — a grid fix belongs with the other post-decode / pre-save image tools.
-The class id `VAEDeGrid` is unchanged, so old workflows resolve once this pack is
-installed.
+Ported here on 2026-08-28 from the standalone `ComfyUI-DeGrid` repo. The class id
+`VAEDeGrid` is unchanged, so old workflows resolve once this pack is installed.
+
+> **That standalone repo was un-retired on 2026-09-20 and is live again**, for
+> people who want the one node without the rest of this pack. Both packs declare
+> the same node id, so **do not install both** — if you do, this pack detects the
+> other and stands down, printing which folder won.
 
 ## Inputs
 
@@ -310,6 +323,7 @@ installed.
 | `enabled` | `on` | Off = image passes through untouched. Flip it for a quick A/B. |
 | `mode` | `auto` | **auto (recommended):** measures the grid strength per image and sets the removal limit itself. **manual:** uses the `limit` widget. Switch only if auto visibly under- or over-corrects. |
 | `limit` | `0.02` | **Manual mode only** (ignored in auto). Max per-pixel correction on the 0–1 scale. VAE grid is usually 0.005–0.02. Too low → grid survives in contrasty areas; too high → fine 2–3px texture (pores, weave) softens. |
+| `skip_when_clean` | `on` | Leave the image completely untouched when no grid is actually there. The node measures the lattice directly, so anything already through an upscaler or a resize passes through **bit-for-bit**. Turn off only to force the filter to run regardless. |
 | `grid_gain` | `10` | Brightness amplification of the `removed_grid` preview **only** — never touches the cleaned image. |
 | `grid_view` | `4x zoom` | Framing of the `removed_grid` preview. `full frame` aliases the 2px lattice into gray noise at preview size; `4x zoom` / `8x zoom` show a magnified center crop where the pattern is visible. Preview only. |
 
@@ -321,9 +335,11 @@ installed.
 | `removed_grid` | `IMAGE` | Visualization of what was subtracted (amplified, centered on gray). Uniform fine speckle = working. Recognizable faces/fabric = limit too high. |
 
 After each run the node's title bar shows a status line, e.g.
-`grid ≈ 2.10/255 — removed (limit 0.019 auto) · edges protected: 1.2%` — that is
-your confirmation it did something, no pixel-peeping needed. Below ~0.5/255 it
-reports the image as already clean.
+`grid 1.97/255 (checker) — removed (limit 0.014 auto) · edges protected: 4.3%` —
+that is your confirmation it did something, no pixel-peeping needed. The bracket
+names the dominant orientation (`checker`, `V-stripe` or `H-stripe`). On an image
+with no lattice you get `grid 0.16/255 — none detected, passed through untouched`
+and nothing is changed.
 
 ## How it works
 
@@ -337,6 +353,24 @@ unsoftened — only the low-amplitude artifact band is removed. In `auto` the cl
 limit is estimated per image from a robust percentile of the extracted grid
 component. Math core is [degrid_core.py](degrid_core.py) — pure torch, no ComfyUI
 imports.
+
+Separately from the clamp, the node decides *whether there is a grid at all* by
+measuring the phase-locked lattice: the grid's phase is tied to the VAE's output
+stride, so averaging the four `(y%2, x%2)` sublattices keeps it while genuine
+detail cancels. Measured on Qwen Image 2.1 output that separates by about 10× —
+native VAE decodes 1.6–2.0/255, the same images after an upscaler 0.10–0.20/255,
+a pure-noise control 0.05/255. Below 0.5/255 the filter is skipped entirely
+rather than run weakly, because the notch is cheap but not free: on a clean,
+detailed image it still shaves roughly 1/255 of real high-frequency detail.
+
+Qwen Image 2.1 ships a different VAE — architecture id `qwen_image_2.1_vae`, a
+64-channel latent and four spatial upsample stages against 16 channels and three
+for the Qwen-Image / Wan 2.1 VAE, so 16× spatial compression rather than 8×. It
+still leaves the same 2px artifact, because the period follows the stride of the
+*final* upsample stage rather than the depth of the VAE. There is no 16px "latent
+grid" to chase: a phase-fold sweep over periods 5–12 shows only the even-period
+harmonics of the 2px component, and an exact-bin comb test reads flat at
+p=4/8/16/32.
 
 Based on the GLSL notch-filter approach shared by
 [u/Haiku-575 on r/StableDiffusion](https://www.reddit.com/r/StableDiffusion/comments/1umwhq7/2px_pixel_grid_on_krea2_from_vae_and_how_to/),
