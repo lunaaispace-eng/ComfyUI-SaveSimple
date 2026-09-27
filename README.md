@@ -190,6 +190,7 @@ Apache-2.0. The changes are listed in the header of `video_nodes.py` as section
 | --- | --- | --- |
 | `frames` | `IMAGE` | the frames as encoded |
 | `filename` | `STRING` | the written video path |
+| `video` | `VIDEO` | the saved file as a native ComfyUI video, audio included; empty for animated image formats (GIF, WebP) |
 
 The sidecar path is derived from the finished video path
 (`splitext(video_path)[0] + ".txt"`), never from a separate counter — two

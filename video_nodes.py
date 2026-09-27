@@ -10,6 +10,7 @@ Changes from the original, as Apache-2.0 section 4(b) requires them to be stated
     final prompt to a .txt beside the video, matching how SaveImageSimple does it
     for stills
   - dropped the dependency on the DaSiWa logging helper
+  - appended a native VIDEO output wrapping the saved video, including audio
 """
 
 import asyncio
@@ -536,8 +537,8 @@ class SaveVideoSimple:
             "hidden": {"prompt": "PROMPT", "extra_pnginfo": "EXTRA_PNGINFO"},
         }
 
-    RETURN_TYPES = ("IMAGE", "STRING")
-    RETURN_NAMES = ("frames", "filename")
+    RETURN_TYPES = ("IMAGE", "STRING", "VIDEO")
+    RETURN_NAMES = ("frames", "filename", "video")
     FUNCTION = "combine"
     OUTPUT_NODE = True
     CATEGORY = "Luna/Save"
@@ -669,7 +670,13 @@ class SaveVideoSimple:
             _log(f"Prompt sidecar: {prompt_sidecar}.")
         elif save_prompt:
             _log("save_prompt is on but prompt_text is empty - no sidecar written.")
-        return {"ui": ui, "result": (output_frames, output_path)}
+        # Wrap the actual encoded file: includes audio, crop and ping-pong.
+        # Animated image formats are not native VIDEO containers.
+        saved_video = None
+        if not animated_settings:
+            from comfy_api.latest import InputImpl
+            saved_video = InputImpl.VideoFromFile(output_path)
+        return {"ui": ui, "result": (output_frames, output_path, saved_video)}
 
 
 NODE_CLASS_MAPPINGS = {"SaveVideoSimple": SaveVideoSimple}
