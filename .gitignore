@@ -14,3 +14,5 @@ output/
 # Local context files — not for git
 CLAUDE.md
 STATUS.md
+AGENTS.md
+.codex/
