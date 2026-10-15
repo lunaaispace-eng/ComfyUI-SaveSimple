@@ -282,32 +282,58 @@ app.registerExtension({
 
         nodeType.prototype.onExecuted = function (message) {
             const result = originalOnExecuted ? originalOnExecuted.apply(this, arguments) : undefined;
-            const video = message?.gifs?.[0] ?? message?.videos?.[0];
-            if (!video?.filename || !this.lunaVideoPreview) return result;
+            loadPreview(this, message?.gifs?.[0] ?? message?.videos?.[0]);
+            return result;
+        };
 
-            const preview = this.lunaVideoPreview;
-            preview.pause();
-            preview.dataset.filename = video.filename;
-            preview.dataset.subfolder = video.subfolder || "";
-            preview.dataset.type = video.type || "output";
-            preview.dataset.fps = video.fps ?? "";
-            preview.dataset.fallback = "0";
-            preview.dataset.codec = video.codec || "";
-            const originalUrl = videoUrl(video);
-            const download = preview.parentElement.querySelector("a");
-            if (download) {
-                download.href = originalUrl;
-                download.download = video.filename;
-            }
-            if (video.width && video.height) {
-                this.lunaVideoPreviewWidget.aspectRatio = video.width / video.height;
-                preview.parentElement.style.aspectRatio = String(this.lunaVideoPreviewWidget.aspectRatio);
-            }
-            // Prefer native playback (including browsers with HEVC support). If
-            // decoding fails, the error handler switches once to FFmpeg streaming.
-            preview.src = shouldUseTranscodedPreview(video) ? transcodedVideoUrl(video) : originalUrl;
-            preview.load();
+        // A tab switch or page reload recreates the node. The frontend then puts the
+        // stored image outputs back (the frame-export PNGs show again) but never calls
+        // onExecuted, so the player stayed empty. Replay the stored video output.
+        const originalOnConfigure = nodeType.prototype.onConfigure;
+        nodeType.prototype.onConfigure = function () {
+            const result = originalOnConfigure ? originalOnConfigure.apply(this, arguments) : undefined;
+            setTimeout(() => restorePreview(this), 0);
             return result;
         };
     },
 });
+
+function storedOutput(node) {
+    const outputs = app.nodeOutputs ?? {};
+    const graph = node.graph;
+    const inSubgraph = graph && graph !== app.rootGraph && graph.id;
+    return outputs[inSubgraph ? `${graph.id}:${node.id}` : String(node.id)];
+}
+
+function restorePreview(node) {
+    if (!node.lunaVideoPreview || node.lunaVideoPreview.dataset.filename) return;
+    const output = storedOutput(node);
+    loadPreview(node, output?.gifs?.[0] ?? output?.videos?.[0]);
+}
+
+function loadPreview(node, video) {
+    if (!video?.filename || !node.lunaVideoPreview) return;
+
+    const preview = node.lunaVideoPreview;
+    preview.pause();
+    preview.dataset.filename = video.filename;
+    preview.dataset.subfolder = video.subfolder || "";
+    preview.dataset.type = video.type || "output";
+    preview.dataset.fps = video.fps ?? "";
+    preview.dataset.fallback = "0";
+    preview.dataset.codec = video.codec || "";
+    const originalUrl = videoUrl(video);
+    const download = preview.parentElement.querySelector("a");
+    if (download) {
+        download.href = originalUrl;
+        download.download = video.filename;
+    }
+    if (video.width && video.height) {
+        node.lunaVideoPreviewWidget.aspectRatio = video.width / video.height;
+        preview.parentElement.style.aspectRatio = String(node.lunaVideoPreviewWidget.aspectRatio);
+    }
+    // Prefer native playback (including browsers with HEVC support). If
+    // decoding fails, the error handler switches once to FFmpeg streaming.
+    preview.src = shouldUseTranscodedPreview(video) ? transcodedVideoUrl(video) : originalUrl;
+    preview.load();
+}
