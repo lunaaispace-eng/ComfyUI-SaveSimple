@@ -11,6 +11,9 @@ Changes from the original, as Apache-2.0 section 4(b) requires them to be stated
     for stills
   - dropped the dependency on the DaSiWa logging helper
   - appended a native VIDEO output wrapping the saved video, including audio
+  - added an optional `output_path` (empty / relative / absolute, as in SaveImageSimple)
+  - rewrote every input's help as a `tooltip` (the original's `description` keys
+    are not shown by ComfyUI) and added OUTPUT_TOOLTIPS
 """
 
 import asyncio
@@ -290,6 +293,18 @@ def _format_filename_prefix(filename_prefix):
     return re.sub(r"%date(?::([^%]+))?%", replace_date, filename_prefix)
 
 
+def _subfolder_under(folder, root):
+    """`folder` relative to `root` with forward slashes, or None when outside it."""
+    folder, root = os.path.abspath(folder), os.path.abspath(root)
+    try:
+        if os.path.normcase(os.path.commonpath([folder, root])) != os.path.normcase(root):
+            return None
+    except ValueError:  # different drives on Windows
+        return None
+    relative = os.path.relpath(folder, root)
+    return "" if relative == "." else relative.replace("\\", "/")
+
+
 def _output_filename(filename, counter, extension):
     return f"{filename}_{counter:05}.{extension.lstrip('.')}"
 
@@ -509,36 +524,91 @@ class SaveVideoSimple:
 
     @classmethod
     def INPUT_TYPES(cls):
+        # `tooltip`, not `description`: ComfyUI shows `tooltip` on hover and the ⓘ panel
+        # lists it; a `description` key on an input is silently ignored.
         return {
             "required": {
-                "images": ("IMAGE", {"description": "Frames to encode as a video."}),
-                "frame_rate": ("FLOAT", {"default": 24.0, "min": 0.1, "max": 240.0, "step": 0.01}),
-                "codec": (_CODEC_OPTIONS, {"default": "Auto", "description": "Auto prefers browser-compatible 8-bit AV1/WebM, then VP9 and H.264 fallbacks. Choose H.265 explicitly when required."}),
-                "container": (_CONTAINER_OPTIONS, {"default": "Auto", "description": "Auto tries video containers only. Select Animated WebP or Animated AVIF manually; these image animations ignore codec selection and cannot include audio."}),
-                "bit_depth": (["Auto", "8-bit", "10-bit"], {"default": "Auto"}),
-                "quality": ("INT", {"default": 20, "min": 0, "max": 51, "description": "Encoding quality for every encoder. 0 is no compression (largest files); higher values increase compression and reduce quality. 20 is the recommended default."}),
-                "log_level": (["Standard", "Verbose"], {"default": "Standard", "description": "Legacy workflow compatibility; logging is always concise."}),
-                "pingpong": ("BOOLEAN", {"default": False, "description": "Append the interior frames in reverse order for seamless forward/reverse playback."}),
-                "save_metadata": ("BOOLEAN", {"default": True, "description": "Embed ComfyUI prompt and workflow metadata for workflow-aware video loaders."}),
-                "filename_prefix": ("STRING", {"default": "video_%date:hhmmss%", "description": "Output path/name prefix. Supports %date% and formatted dates such as video/%date:yyyy-MM-dd%/%date:hhmmss%."}),
-                "save_output": ("BOOLEAN", {"default": True}),
-                "pass_frames": ("BOOLEAN", {"default": False, "description": "Return the encoded frame sequence for downstream processing."}),
-                "crop_to_audio": ("BOOLEAN", {"default": False, "description": "When audio is connected, end the output video at the audio duration."}),
-                "audio_codec": (_AUDIO_CODEC_OPTIONS, {"default": "Auto", "description": "Audio codec. Auto uses Opus for WebM and AAC for MKV/MP4."}),
-                "audio_bitrate": (_AUDIO_BITRATE_OPTIONS, {"default": "192k", "description": "Target bitrate for the connected audio stream."}),
-                "save_first_frame": ("BOOLEAN", {"default": False, "description": "Write the first frame as a PNG beside the encoded video."}),
-                "save_last_frame": ("BOOLEAN", {"default": False, "description": "Write the last frame as a PNG beside the encoded video."}),
-                "save_prompt": ("BOOLEAN", {"default": True, "description": "Write the prompt to a .txt beside the video, same base name. Needs prompt_text connected."}),
+                "images": ("IMAGE", {"tooltip": "The frames to encode, in order. One IMAGE batch = one video."}),
+                "frame_rate": ("FLOAT", {"default": 24.0, "min": 0.1, "max": 240.0, "step": 0.01,
+                    "tooltip": "Playback speed in frames per second. Match the model that made the frames "
+                               "(MiniMax H3 and Wan: 24; LTX: 24 or 25), or the video plays too fast or too slow."}),
+                "codec": (_CODEC_OPTIONS, {"default": "Auto",
+                    "tooltip": "Auto tries AV1, then VP9, then H.264, and keeps the first one this machine can "
+                               "encode (NVENC on an NVIDIA card). H.264 plays everywhere; pick it for sharing. "
+                               "H.265 is smaller but some browsers will not preview it."}),
+                "container": (_CONTAINER_OPTIONS, {"default": "Auto",
+                    "tooltip": "The file type. Auto picks one that fits the codec (WebM, MKV or MP4). MP4 is the "
+                               "safest to share. Animated WebP / AVIF make an image animation instead: codec is "
+                               "ignored, there is no audio and no VIDEO output."}),
+                "bit_depth": (["Auto", "8-bit", "10-bit"], {"default": "Auto",
+                    "tooltip": "Colour precision. Auto: 8-bit when codec is Auto; with a chosen codec, 10-bit only if "
+                               "the frames carry 10-bit detail. 10-bit reduces banding "
+                               "in skies and gradients but needs AV1, H.265 or VP9 and a player that supports it."}),
+                "quality": ("INT", {"default": 20, "min": 0, "max": 51,
+                    "tooltip": "Lower = better picture, bigger file. 0 is near-lossless and huge; 18-23 looks "
+                               "clean; above 30 shows blocks. 20 is the recommended default."}),
+                "log_level": (["Standard", "Verbose"], {"default": "Standard",
+                    "tooltip": "Kept so old workflows still load. Has no effect: the console log is always short."}),
+                "pingpong": ("BOOLEAN", {"default": False,
+                    "tooltip": "Play forward, then backward, so the clip loops without a jump. Almost doubles the "
+                               "length. Audio is not reversed."}),
+                "save_metadata": ("BOOLEAN", {"default": True,
+                    "tooltip": "Embed the workflow and prompt in the video file, so a workflow-aware loader can "
+                               "restore the graph from it. Off = a clean file with no workflow inside."}),
+                "filename_prefix": ("STRING", {"default": "video_%date:hhmmss%",
+                    "tooltip": "Filename. Files are numbered: video_120455_00001.mp4. Date tokens: %date%, "
+                               "%date:hhmmss%, %date:yyyy-MM-dd%. Put folders in output_path (a folder here "
+                               "still works, but only inside the output folder)."}),
+                "save_output": ("BOOLEAN", {"default": True,
+                    "tooltip": "On = keep the video in the output folder (or output_path). Off = write it to "
+                               "ComfyUI's temp folder for preview only; it is deleted on the next restart."}),
+                "pass_frames": ("BOOLEAN", {"default": False,
+                    "tooltip": "On = the frames output carries the encoded frames (ping-pong applied). Off = it is "
+                               "empty, which saves memory when nothing is wired to it."}),
+                "crop_to_audio": ("BOOLEAN", {"default": False,
+                    "tooltip": "With audio connected. On = the file ends when the audio ends (extra frames are cut). "
+                               "Off = the file runs to whichever is longer, the frames or the audio."}),
+                "audio_codec": (_AUDIO_CODEC_OPTIONS, {"default": "Auto",
+                    "tooltip": "Auto uses Opus for WebM and AAC for MKV / MP4. Leave on Auto unless a player "
+                               "rejects the file."}),
+                "audio_bitrate": (_AUDIO_BITRATE_OPTIONS, {"default": "192k",
+                    "tooltip": "Audio quality. 192k is clean for music and speech; 320k for critical music; "
+                               "128k for small files."}),
+                "save_first_frame": ("BOOLEAN", {"default": False,
+                    "tooltip": "Also save the first frame as a PNG beside the video. Useful as a thumbnail or as "
+                               "the start image of the next clip."}),
+                "save_last_frame": ("BOOLEAN", {"default": False,
+                    "tooltip": "Also save the last frame as a PNG beside the video. Feed it to the next clip's "
+                               "start image to continue a shot."}),
+                "save_prompt": ("BOOLEAN", {"default": True,
+                    "tooltip": "Write the prompt to a .txt beside the video, same name. Needs prompt_text "
+                               "connected; with nothing wired, no .txt is written."}),
             },
             "optional": {
-                "audio": ("AUDIO", {"description": "Optional ComfyUI audio to mux into the encoded video."}),
-                "prompt_text": ("STRING", {"forceInput": True, "description": "The final prompt, wired from whatever produced it. Written verbatim to the sidecar."}),
+                "audio": ("AUDIO", {"tooltip": "Optional sound to put into the video. Not used for Animated "
+                                               "WebP / AVIF, which cannot hold audio."}),
+                "prompt_text": ("STRING", {"forceInput": True,
+                    "tooltip": "The final prompt, wired from whatever produced it (e.g. the LLM node). Written "
+                               "word for word to the .txt when save_prompt is on."}),
+                # Last on purpose: widget values load by position, so a new widget
+                # anywhere earlier would shift every saved workflow's settings.
+                "output_path": ("STRING", {"default": "",
+                    "placeholder": "empty = ComfyUI output folder",
+                    "tooltip": "Where to save. Empty = ComfyUI output folder. A relative name = a subfolder of "
+                               "it (renders/h3). An absolute path = save exactly there (D:/Videos/h3). Date "
+                               "tokens work: renders/%date:yyyy-MM-dd%. The in-node player only plays files "
+                               "inside the output folder."}),
             },
             "hidden": {"prompt": "PROMPT", "extra_pnginfo": "EXTRA_PNGINFO"},
         }
 
     RETURN_TYPES = ("IMAGE", "STRING", "VIDEO")
     RETURN_NAMES = ("frames", "filename", "video")
+    OUTPUT_TOOLTIPS = (
+        "The frames as encoded (ping-pong applied). Empty unless pass_frames is on.",
+        "Full path of the saved video file.",
+        "The saved file as a native ComfyUI VIDEO, sound included. Empty for Animated WebP / AVIF.",
+    )
     FUNCTION = "combine"
     OUTPUT_NODE = True
     CATEGORY = "Luna/Save"
@@ -559,7 +629,7 @@ class SaveVideoSimple:
         self, images, frame_rate, codec, container, bit_depth, quality, pingpong,
         save_metadata, filename_prefix, save_output, pass_frames, crop_to_audio=False, audio_codec="Auto",
         audio_bitrate="192k", log_level="Standard", save_first_frame=False, save_last_frame=False, save_prompt=True,
-        audio=None, prompt_text="", prompt=None, extra_pnginfo=None,
+        audio=None, prompt_text="", output_path="", prompt=None, extra_pnginfo=None,
     ):
         if images.ndim != 4 or images.shape[-1] < 3:
             raise ValueError("images must be an IMAGE batch shaped [frames, height, width, channels] with RGB channels.")
@@ -582,7 +652,17 @@ class SaveVideoSimple:
         output_type = "output" if save_output else "temp"
         height, width = images.shape[1:3]
         filename_prefix = _format_filename_prefix(filename_prefix)
-        output_folder, filename, counter, subfolder, _ = folder_paths.get_save_image_path(filename_prefix, output_dir, width, height)
+        # output_path works as in Save Image: empty = output (or temp) folder,
+        # relative = subfolder of it, absolute = exactly there. The prefix may
+        # still hold folders, as before, but only below the target directory.
+        save_dir = _format_filename_prefix(output_path or "").strip()
+        target_dir = output_dir
+        if save_dir:
+            target_dir = save_dir if os.path.isabs(save_dir) else os.path.join(output_dir, save_dir)
+        os.makedirs(target_dir, exist_ok=True)
+        output_folder, filename, counter, _, _ = folder_paths.get_save_image_path(filename_prefix, target_dir, width, height)
+        # The player can only fetch files inside the output/temp folder.
+        subfolder = _subfolder_under(output_folder, output_dir)
         ffmpeg = find_ffmpeg()
         if not ffmpeg:
             raise RuntimeError("No FFmpeg executable was found. Install FFmpeg or imageio-ffmpeg for the mandatory H.264/MP4 fallback.")
@@ -660,8 +740,12 @@ class SaveVideoSimple:
             {"filename": os.path.basename(path), "subfolder": subfolder, "type": output_type, "format": "image/png", "width": width, "height": height}
             for path in frame_exports
         )
+        if subfolder is None:
+            # Saved outside the output folder: nothing the player may fetch.
+            assets = []
+            _log("Saved outside the ComfyUI output folder - no in-node preview.")
         ui = {"images": assets}
-        if not animated_settings:
+        if not animated_settings and subfolder is not None:
             ui["gifs"] = [{"filename": os.path.basename(output_path), "subfolder": subfolder, "type": output_type, "format": output_mime_type, "codec": selected_codec, "bit_depth": selected_bit_depth, "container": selected_container, "width": width, "height": height, "fps": frame_rate}]
         _log(f"Output: {output_path} ({selected_codec}, {encoder}, {selected_bit_depth}-bit).")
         for path in frame_exports:

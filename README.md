@@ -183,7 +183,7 @@ Apache-2.0. The changes are listed in the header of `video_nodes.py` as section
 | `frame_rate`, `codec`, `container`, `bit_depth`, `quality` | encoding |
 | `pingpong`, `crop_to_audio`, `pass_frames` | frame handling |
 | `audio_codec`, `audio_bitrate` | audio encoding |
-| `filename_prefix`, `save_output`, `save_metadata` | output |
+| `filename_prefix`, `output_path`, `save_output`, `save_metadata` | output |
 | `save_first_frame`, `save_last_frame`, `save_prompt` | extras, in the player panel |
 
 | Output | Type | Description |
@@ -191,6 +191,14 @@ Apache-2.0. The changes are listed in the header of `video_nodes.py` as section
 | `frames` | `IMAGE` | the frames as encoded |
 | `filename` | `STRING` | the written video path |
 | `video` | `VIDEO` | the saved file as a native ComfyUI video, audio included; empty for animated image formats (GIF, WebP) |
+
+`output_path` works as in Luna Save Image: empty saves to the ComfyUI output
+folder, a relative name saves to a subfolder of it, an absolute path saves
+exactly there. Date tokens work (`renders/%date:yyyy-MM-dd%`). With
+`save_output` off, empty and relative paths land in the temp folder instead. The
+in-node player can only play files inside the output folder, so a video saved
+elsewhere has no preview; the file and the `filename` / `video` outputs are
+unaffected. Every input has a hover tooltip, also listed in the ⓘ panel.
 
 The sidecar path is derived from the finished video path
 (`splitext(video_path)[0] + ".txt"`), never from a separate counter — two
