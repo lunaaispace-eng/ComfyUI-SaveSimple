@@ -104,6 +104,17 @@ app.registerExtension({
     async beforeRegisterNodeDef(nodeType, nodeData) {
         if (nodeData.name !== NODE_NAME) return;
 
+        // output_path sits under filename_prefix, so positional widgets_values
+        // from older saves would land one widget off. Naming the old order makes
+        // the frontend restore by name: files without widgets_values_named map
+        // through this list, files with it use their own names.
+        nodeData.fallbackWidgetsValuesNames = [
+            "frame_rate", "codec", "container", "bit_depth", "quality", "log_level",
+            "pingpong", "save_metadata", "filename_prefix", "save_output", "pass_frames",
+            "crop_to_audio", "audio_codec", "audio_bitrate", "save_first_frame",
+            "save_last_frame", "save_prompt", "video_preview",
+        ];
+
         const originalOnNodeCreated = nodeType.prototype.onNodeCreated;
         const originalOnExecuted = nodeType.prototype.onExecuted;
 

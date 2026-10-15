@@ -559,6 +559,14 @@ class SaveVideoSimple:
                     "tooltip": "Filename. Files are numbered: video_120455_00001.mp4. Date tokens: %date%, "
                                "%date:hhmmss%, %date:yyyy-MM-dd%. Put folders in output_path (a folder here "
                                "still works, but only inside the output folder)."}),
+                # Right under filename_prefix. Moving a widget shifts positional
+                # widgets_values; js/save_video_simple_preview.js maps old saves by name.
+                "output_path": ("STRING", {"default": "",
+                    "placeholder": "empty = ComfyUI output folder",
+                    "tooltip": "Where to save. Empty = ComfyUI output folder. A relative name = a subfolder of "
+                               "it (renders/h3). An absolute path = save exactly there (D:/Videos/h3). Date "
+                               "tokens work: renders/%date:yyyy-MM-dd%. The in-node player only plays files "
+                               "inside the output folder."}),
                 "save_output": ("BOOLEAN", {"default": True,
                     "tooltip": "On = keep the video in the output folder (or output_path). Off = write it to "
                                "ComfyUI's temp folder for preview only; it is deleted on the next restart."}),
@@ -590,14 +598,6 @@ class SaveVideoSimple:
                 "prompt_text": ("STRING", {"forceInput": True,
                     "tooltip": "The final prompt, wired from whatever produced it (e.g. the LLM node). Written "
                                "word for word to the .txt when save_prompt is on."}),
-                # Last on purpose: widget values load by position, so a new widget
-                # anywhere earlier would shift every saved workflow's settings.
-                "output_path": ("STRING", {"default": "",
-                    "placeholder": "empty = ComfyUI output folder",
-                    "tooltip": "Where to save. Empty = ComfyUI output folder. A relative name = a subfolder of "
-                               "it (renders/h3). An absolute path = save exactly there (D:/Videos/h3). Date "
-                               "tokens work: renders/%date:yyyy-MM-dd%. The in-node player only plays files "
-                               "inside the output folder."}),
             },
             "hidden": {"prompt": "PROMPT", "extra_pnginfo": "EXTRA_PNGINFO"},
         }
