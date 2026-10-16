@@ -9,7 +9,8 @@ import sys
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from asset_timeline import check_placements, h3_tags, newest_video, shot_frames, tail_start  # noqa: E402
+from asset_timeline import (check_placements, h3_tags, newest_video, shot_frames, tail_start,  # noqa: E402
+                            target_fps, target_grid)
 
 
 class TagTests(unittest.TestCase):
@@ -42,6 +43,27 @@ class PlacementTests(unittest.TestCase):
 
     def test_a_frame_past_the_last_is_refused(self):
         self.assertEqual(len(check_placements(124, [("P1", 124, 1)])), 1)
+
+
+class TargetTests(unittest.TestCase):
+    def test_frame_rate_per_target(self):
+        self.assertEqual(target_fps("h3", 30.0), 24.0)
+        self.assertEqual(target_fps("ltx", 30.0), 25.0)
+        self.assertEqual(target_fps("general", 29.97), 29.97)
+
+    def test_grid_per_target(self):
+        self.assertEqual(target_grid("h3"), "h3")
+        self.assertEqual(target_grid("ltx"), "ltx")
+        self.assertEqual(target_grid("general"), "free")
+
+    def test_ltx_clip_guides_start_at_0_or_8k_plus_1(self):
+        self.assertEqual(check_placements(121, [("V1", 0, 17), ("V2", 33, 17)], "ltx"), [])
+        errs = check_placements(121, [("V1", 30, 17)], "ltx")
+        self.assertEqual(len(errs), 1)
+        self.assertIn("25 or 33", errs[0])
+
+    def test_ltx_single_frames_go_anywhere(self):
+        self.assertEqual(check_placements(121, [("P1", 30, 1)], "ltx"), [])
 
 
 class ShotLengthTests(unittest.TestCase):

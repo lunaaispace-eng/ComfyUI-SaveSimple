@@ -65,7 +65,7 @@ import folder_paths
 import node_helpers
 
 from .asset_timeline import (check_placements, h3_tags, newest_video, normalize_sound_role, shot_frames,
-                             tail_start, thinning_error)
+                             tail_start, target_fps, target_grid, thinning_error)
 from .media_io import (FPS, clip_bytes, clip_soundtrack, decode_clip, filmstrip_jpeg, grid_frames, strip_annotation,
                        load_audio, load_audio_window, probe_media, song_shot_count, song_shot_start)
 
@@ -218,8 +218,14 @@ def _parse_media(raw: str) -> dict:
         "take": "last" if c.get("take") == "last" else "frames",
         "frames": max(1, int(c.get("frames") or 22)),
     }
+    # Node-wide settings from the ⚙ panel.
+    st = data.get("settings") if isinstance(data.get("settings"), dict) else {}
+    settings = {
+        "target": st.get("target") if st.get("target") in ("h3", "ltx", "general") else "h3",
+        "memory_gb": min(64.0, max(1.0, float(st.get("memory_gb") or MEMORY_CAP / 1024 ** 3))),
+    }
     return {"audio": cards, "video": clips, "pictures": pics,
-            "shot_frames": max(1, int(shot.get("frames") or 124)), "continuation": cont}
+            "shot_frames": max(1, int(shot.get("frames") or 124)), "continuation": cont, "settings": settings}
 
 
 def _clock(t: float) -> str:
@@ -488,9 +494,11 @@ class LunaAssetLoader:
 
         # --- load everything -------------------------------------------------
         audio, song, song_line = self._song(cards, seconds, shot)
-        decoded = self._clips(clips, width, height)
+        settings = media["settings"]
+        decoded = self._clips(clips, width, height, settings)
         extra_sounds = self._sounds(cards)
-        carry, carry_line = self._continuation(media["continuation"], cards, song, width, height, previous_frames)
+        carry, carry_line = self._continuation(media["continuation"], cards, song, width, height, previous_frames,
+                                               settings)
         frames, dims, originals = [], [], []
         if paths:
             states = _parse_state(asset_state, len(paths))
@@ -512,7 +520,7 @@ class LunaAssetLoader:
                    for j, c in enumerate(cards) if c["role"] in ("guide", "lock")]
         if carry is not None:
             placed.append(("The continuation", 0, int(carry["frames" if carry["kind"] == "video" else "image"].shape[0])))
-        errors = check_placements(shot_len, placed)
+        errors = check_placements(shot_len, placed, settings["target"])
         if errors:
             raise RuntimeError("[Luna Asset Loader] " + " ".join(errors) + " Drag it on the shot timeline.")
 
@@ -600,22 +608,26 @@ class LunaAssetLoader:
         return {"ui": {"luna_asset_audio": [song] if song else []}, "result": result}
 
     @staticmethod
-    def _clips(clips, width, height):
+    def _clips(clips, width, height, settings=None):
         """Video cards -> [{"batch", "sound", "info", "line"}], in card order."""
         out = []
+        settings = settings or {"target": "h3", "memory_gb": MEMORY_CAP / 1024 ** 3}
+        cap, grid_t = settings["memory_gb"] * 1024 ** 3, target_grid(settings["target"])
         box = (int(width), int(height)) if width and height and int(width) > 0 and int(height) > 0 else None
         for k, c in enumerate(clips, 1):
             path = _media_file(c["file"])
             if not path:
                 raise RuntimeError(f"[Luna Asset Loader] Clip not found in the input folder: {c['file']}")
-            bad = thinning_error(c["count"], c["nth"])
+            grid = grid_t if c["count"] == "target" else "free"
+            bad = thinning_error("target" if grid != "free" else "free", c["nth"])
             if bad:
                 raise RuntimeError(f"[Luna Asset Loader] Clip V{k} ({c['file']}): {bad}")
             info = probe_media(path)
             if not info.get("video"):
                 raise RuntimeError(f"[Luna Asset Loader] {c['file']} has no picture, only sound.")
-            fps = FPS if c["fps"] == "target" else (info["fps"] or FPS) if c["fps"] == "source" else c["fps"]
-            frames = grid_frames(c["frames"], "h3") if c["count"] == "target" else c["frames"]
+            fps = (target_fps(settings["target"], info["fps"]) if c["fps"] == "target"
+                   else (info["fps"] or FPS) if c["fps"] == "source" else c["fps"])
+            frames = grid_frames(c["frames"], grid)
             if c["size"] == "canvas" and box:
                 size, (ow, oh) = ("box", box[0], box[1]), box
             elif c["size"] == "source":
@@ -626,13 +638,13 @@ class LunaAssetLoader:
                 ow, oh = int(round(info["width"] * s)), int(round(info["height"] * s))
                 ow, oh = max(2, ow - ow % 2), max(2, oh - oh % 2)   # media_io._target_size's even rule
             cost = clip_bytes(-(-frames // c["nth"]), ow, oh, c["precision"])
-            if cost > MEMORY_CAP:
+            if cost > cap:
                 raise RuntimeError(
                     f"[Luna Asset Loader] Clip V{k} ({c['file']}) would need {cost / 1024 ** 3:.1f} GB as "
-                    f"{frames} frames at {ow}x{oh} {c['precision']} — more than the {MEMORY_CAP / 1024 ** 3:.0f} GB "
-                    f"this node allows. Shorten it, take every 2nd frame, use fp16 or a smaller size.")
-            batch, got = decode_clip(path, c["start"], frames, fps, size, c["fit"], c["nth"], c["precision"],
-                                     "h3" if c["count"] == "target" else "free")
+                    f"{frames} frames at {ow}x{oh} {c['precision']} — more than the {cap / 1024 ** 3:g} GB "
+                    f"this node allows (⚙ Memory cap). Shorten it, use fp16 or a smaller size, or raise the cap"
+                    + ("." if grid != "free" else ", or take every 2nd frame."))
+            batch, got = decode_clip(path, c["start"], frames, fps, size, c["fit"], c["nth"], c["precision"], grid)
             sound = clip_soundtrack(path, got["start"], got["seconds"]) if c["sound"] == "keep" else None
             line = (f"{got['name']} from {_clock(got['start'])}, {got['frames']} frames "
                     f"({got['seconds']:.2f} s) at {got['fps']:g} fps, {got['width']}x{got['height']}")
@@ -692,7 +704,7 @@ class LunaAssetLoader:
         return audio, info, line
 
     @staticmethod
-    def _continuation(cont, cards, song, width, height, previous_frames):
+    def _continuation(cont, cards, song, width, height, previous_frames, settings=None):
         """The end of the previous shot -> (timeline item at frame 0, brief line), or (None, "").
 
         As many frames as the song's overlap when the song is cut by shot number, so
@@ -722,9 +734,10 @@ class LunaAssetLoader:
             info = probe_media(path)
             box = (int(width), int(height)) if width and height and int(width) > 0 and int(height) > 0 else None
             size = ("box", box[0], box[1]) if box else ("edge", 768)
-            fps = FPS if n > 1 else (info.get("fps") or FPS)
+            target = (settings or {}).get("target", "h3")
+            fps = target_fps(target, info.get("fps")) if n > 1 else (info.get("fps") or FPS)
             tail, got = decode_clip(path, tail_start(info.get("duration", 0.0), fps, n, info.get("fps")), n, fps,
-                                    size, "crop", 1, "fp32", "h3" if n > 1 else "free")
+                                    size, "crop", 1, "fp32", target_grid(target) if n > 1 else "free")
             if n > 1 and got["frames"] < n:
                 raise RuntimeError(f"[Luna Asset Loader] {got['name']} gave {got['frames']} frame(s) for the "
                                    f"continuation; it needs {n}.")

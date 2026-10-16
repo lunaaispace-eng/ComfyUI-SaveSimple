@@ -354,6 +354,21 @@ shot, so the motion carries on across the cut:
 The frames end exactly on the previous shot's last image. Shot 1 has nothing
 before it, so its continuation is skipped and the brief says so.
 
+## ⚙ Settings
+
+The **⚙** button opens a panel against the node's right edge (it pans and zooms
+with the node; ✕, Done or Esc close it):
+
+| Setting | What it does |
+| --- | --- |
+| **Target** | **MiniMax H3** (24 fps, clips 17k+5), **LTX** (25 fps, clips 8k+1, clip guides only at frame 0 or 8k+1), or **General** (the source's own rate, any length). "Target" frame rate and frame grid on every clip, the shot's ± step and the song snap follow it |
+| **New clips** | the frame rate, size and precision a newly added clip starts with |
+| **Memory cap** | a clip that would need more is refused before decoding (default 6 GB) |
+| **Sound** | the ◀ ▶ nudge step (0.1 s, 1 frame, 0.5 s) and what new songs do past their end |
+| **Node** | the picture preview's height |
+
+The settings live in `media_state` with everything else, so they travel with the workflow.
+
 ## Per-image resize
 
 `mode` defaults to `off` — nothing is touched unless asked, which is what H3's

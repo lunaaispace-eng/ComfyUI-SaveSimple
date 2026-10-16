@@ -188,6 +188,26 @@ const CSS = `
 .luna-al-chip { font-size:9.5px; font-weight:700; padding:2px 6px; border-radius:5px; cursor:pointer; color:var(--luna-bg); }
 .luna-al-chip.p { background:var(--luna-accent); } .luna-al-chip.v { background:#d98a6a; } .luna-al-chip.a { background:#e07bb4; }
 .luna-al-tlnote { font-size:10px; color:var(--luna-muted); line-height:1.4; }
+
+/* The settings panel (v3), after LLM Prompt's. Fixed colours: it lives on
+   document.body, outside the node's variables. */
+.luna-al-sp { position:fixed; z-index:1300; width:330px; transform-origin:0 0; background:#1c1e25;
+              border:1px solid #e0a45866; border-radius:8px; box-shadow:0 10px 30px #000a;
+              font:12px "Segoe UI", system-ui, sans-serif; color:#e7e5df; }
+.luna-al-sp .hd { display:flex; align-items:center; gap:8px; padding:9px 12px; border-bottom:1px solid #2e313c; }
+.luna-al-sp .hd .t { flex:1; font-weight:600; font-size:13px; }
+.luna-al-sp .x, .luna-al-sp .rs, .luna-al-sp .dn { cursor:pointer; color:#8b8e99; }
+.luna-al-sp .x:hover, .luna-al-sp .rs:hover, .luna-al-sp .dn:hover { color:#e0a458; }
+.luna-al-sp .bd { padding:2px 12px 10px; }
+.luna-al-sp .sh { color:#e0a458; font-weight:600; font-size:12px; margin:10px 0 5px; }
+.luna-al-sp .rw { display:grid; grid-template-columns:110px 1fr; align-items:center; gap:8px; margin:5px 0; }
+.luna-al-sp .ch { display:flex; gap:4px; flex-wrap:wrap; align-items:center; color:#8b8e99; }
+.luna-al-sp .ch span { padding:2px 8px; border:1px solid #2e313c; border-radius:4px; color:#e7e5df; cursor:pointer; }
+.luna-al-sp .ch span:hover { border-color:#8b8e99; }
+.luna-al-sp .ch span.on { border-color:#e0a458; color:#e0a458; background:#e0a45814; }
+.luna-al-sp .nb { width:56px; background:#14151a; border:1px solid #2e313c; border-radius:4px; color:#e7e5df; text-align:center; padding:2px 0; }
+.luna-al-sp .nt { font-size:11px; color:#8b8e99; margin:0 0 4px 118px; line-height:1.4; }
+.luna-al-sp .ft { border-top:1px solid #2e313c; padding:7px 12px; display:flex; justify-content:space-between; }
 `;
 
 function injectCSS() {
@@ -358,6 +378,111 @@ function contFrames(m, wiredShotNo = null) {
     return { frames: byShot ? Number(song.overlap ?? 22) : Number(c.frames) || 22, shot1: false, fromSong: byShot };
 }
 
+/* -------------------------------------------------------------- ⚙ panel */
+
+// The settings panel, after LLM Prompt's (llm_prompt_panel.mjs, itself after
+// Pixaroma's node_panel.mjs, MIT): it sits against the node's right edge and is
+// redrawn every frame at the canvas zoom, so it pans and zooms with the node; it
+// does not close on an outside click (only ⚙, ✕, Done, Esc); a focused field is
+// blurred before it goes, or Chrome drops the typed value.
+let _sp = null;   // { el, node, stop }
+function closeSettings() {
+    if (!_sp) return;
+    const p = _sp;
+    _sp = null;
+    if (p.el.contains(document.activeElement)) document.activeElement.blur();
+    p.stop();
+    p.el.remove();
+}
+const settingsOpenFor = (node) => !!_sp && _sp.node === node;
+
+function openSettings(node) {
+    if (settingsOpenFor(node)) { closeSettings(); return; }
+    closeSettings();
+    const el = document.createElement("div");
+    el.className = "luna-al-sp";
+    el.innerHTML = `<div class="hd"><span>⚙</span><span class="t">Asset Loader settings</span><span class="x" title="Close">✕</span></div>
+        <div class="bd"></div><div class="ft"><span class="rs" title="Back to the defaults">reset</span><span class="dn">Done</span></div>`;
+    const body = el.querySelector(".bd");
+    const set = (patch) => {
+        const m = readMedia(node);
+        const cur = m.settings || {};
+        m.settings = { ...cur, ...patch,
+            ...(patch.video ? { video: { ...(cur.video || {}), ...patch.video } } : {}),
+            ...(patch.audio ? { audio: { ...(cur.audio || {}), ...patch.audio } } : {}),
+            ...(patch.node ? { node: { ...(cur.node || {}), ...patch.node } } : {}) };
+        writeMedia(node, m);
+        node._lunaRender?.();
+        draw();
+    };
+    const chips = (label, opts, cur, f, note) => {
+        const r = document.createElement("div");
+        r.className = "rw";
+        r.innerHTML = `<span class="l"></span><span class="ch"></span>`;
+        r.querySelector(".l").textContent = label;
+        for (const [v, text] of opts) {
+            const c = document.createElement("span");
+            c.textContent = text;
+            if (String(v) === String(cur)) c.className = "on";
+            c.onclick = () => f(v);
+            r.querySelector(".ch").appendChild(c);
+        }
+        body.appendChild(r);
+        if (note) { const n = document.createElement("div"); n.className = "nt"; n.textContent = note; body.appendChild(n); }
+    };
+    const head = (icon, text) => { const h = document.createElement("div"); h.className = "sh"; h.textContent = `${icon}  ${text}`; body.appendChild(h); };
+    function draw() {
+        const s = settingsOf(readMedia(node));
+        body.replaceChildren();
+        head("◎", "Target");
+        chips("Workflow", [["h3", "MiniMax H3"], ["ltx", "LTX"], ["general", "General"]], s.target,
+              (v) => set({ target: v }), (TARGETS[s.target] || TARGETS.h3).note);
+        head("▶", "New clips");
+        chips("Frame rate", [["target", "Target"], ["source", "Source"]], s.video.fps, (v) => set({ video: { fps: v } }));
+        chips("Size", [["canvas", "Match canvas"], ["edge", "768 edge"], ["source", "Source"]], s.video.size, (v) => set({ video: { size: v } }));
+        chips("Precision", [["fp16", "fp16"], ["fp32", "fp32"]], s.video.precision, (v) => set({ video: { precision: v } }));
+        const r = document.createElement("div");
+        r.className = "rw";
+        r.innerHTML = `<span class="l">Memory cap</span><span class="ch"><input class="nb" value="${Number(s.memory_gb)}"> GB</span>`;
+        const nb = r.querySelector(".nb");
+        nb.onchange = () => { const v = Number(nb.value); if (v >= 1 && v <= 64) set({ memory_gb: v }); else nb.value = s.memory_gb; };
+        nb.addEventListener("keydown", (e) => { if (e.key === "Enter") nb.blur(); });
+        body.appendChild(r);
+        const nt = document.createElement("div"); nt.className = "nt";
+        nt.textContent = "A clip that would need more than this is refused before decoding. Applies to every clip on the node.";
+        body.appendChild(nt);
+        head("♪", "Sound");
+        chips("Nudge step", [[0.1, "0.1 s"], [1 / 24, "1 frame"], [0.5, "0.5 s"]], s.audio.nudge, (v) => set({ audio: { nudge: v } }));
+        chips("New songs end in", [["silence", "Silence"], ["loop", "Loop"]], s.audio.fill, (v) => set({ audio: { fill: v } }));
+        head("▦", "Node");
+        chips("Preview height", [["S", "S"], ["M", "M"], ["L", "L"]], s.node.preview, (v) => set({ node: { preview: v } }));
+    }
+    draw();
+    el.querySelector(".x").onclick = closeSettings;
+    el.querySelector(".dn").onclick = closeSettings;
+    el.querySelector(".rs").onclick = () => { const m = readMedia(node); m.settings = {}; writeMedia(node, m); node._lunaRender?.(); draw(); };
+    el.addEventListener("keydown", (e) => { if (e.key === "Escape") { e.stopPropagation(); closeSettings(); } else e.stopPropagation(); });
+    el.addEventListener("pointerdown", (e) => e.stopPropagation());
+    el.addEventListener("wheel", (e) => e.stopPropagation(), { passive: true });
+    document.body.appendChild(el);
+
+    let raf = 0, alive = true;
+    const follow = () => {
+        if (!alive) return;
+        if (!node.graph || app.canvas?.graph !== node.graph) { closeSettings(); return; }
+        const ds = app.canvas.ds, r = app.canvas.canvas.getBoundingClientRect();
+        const th = window.LiteGraph?.NODE_TITLE_HEIGHT || 30;
+        el.style.left = `${r.left + (node.pos[0] + node.size[0] + 10 + ds.offset[0]) * ds.scale}px`;
+        el.style.top = `${r.top + (node.pos[1] - th + ds.offset[1]) * ds.scale}px`;
+        el.style.transform = `scale(${ds.scale})`;
+        raf = requestAnimationFrame(follow);
+    };
+    follow();
+    const onEsc = (e) => { if (e.key === "Escape" && !/^(INPUT|TEXTAREA|SELECT)$/.test(e.target?.tagName || "")) closeSettings(); };
+    document.addEventListener("keydown", onEsc, true);
+    _sp = { el, node, stop() { alive = false; cancelAnimationFrame(raf); document.removeEventListener("keydown", onEsc, true); } };
+}
+
 // H3 clip lengths are 17k+5 frames; step to the previous / next one.
 function stepH3Frames(n, dir) {
     let f = Math.max(5, Math.round(n));
@@ -395,8 +520,48 @@ function readMedia(node) {
             pictures: Array.isArray(m.pictures) ? m.pictures.map((p) => p || {}) : [],
             shot: m.shot && Number(m.shot.frames) > 0 ? { frames: Number(m.shot.frames) } : null,
             continuation: m.continuation && typeof m.continuation === "object" ? m.continuation : null,
+            settings: m.settings && typeof m.settings === "object" ? m.settings : {},
         };
-    } catch { return { audio: [], video: [], pictures: [], shot: null, continuation: null }; }
+    } catch { return { audio: [], video: [], pictures: [], shot: null, continuation: null, settings: {} }; }
+}
+
+/* ---------------------------------------------------------------- settings */
+
+// Node-wide settings (⚙). Defaults when nothing is set: MiniMax H3, 6 GB.
+const SETTINGS = {
+    target: "h3", memory_gb: 6,
+    video: { fps: "target", size: "canvas", precision: "fp16" },
+    audio: { nudge: 0.1, fill: "silence" },
+    node: { preview: "M" },
+};
+const settingsOf = (m) => {
+    const s = m.settings || {};
+    return { ...SETTINGS, ...s, video: { ...SETTINGS.video, ...(s.video || {}) },
+             audio: { ...SETTINGS.audio, ...(s.audio || {}) }, node: { ...SETTINGS.node, ...(s.node || {}) } };
+};
+// What each target means — mirrors asset_timeline.target_fps / target_grid.
+const TARGETS = {
+    h3: { label: "MiniMax H3", fps: 24, grid: "h3", step: 17, gridText: "H3 grid (17k+5)",
+          note: "24 fps. Clips 17k+5 frames. Pictures and clips anchor at any frame; a sound runs from its frame to the end." },
+    ltx: { label: "LTX", fps: 25, grid: "ltx", step: 8, gridText: "LTX grid (8k+1)",
+           note: "25 fps. Clips 8k+1 frames, anchored at frame 0 or 8k+1 (LTXVAddGuide moves anything else)." },
+    general: { label: "General", fps: null, grid: "free", step: 24, gridText: "Free",
+               note: "Files as they are: the source's own frame rate and any length." },
+};
+const targetOf = (m) => TARGETS[settingsOf(m).target] || TARGETS.h3;
+const PREVIEW_SIZES = { S: 120, M: PREVIEW_H, L: 260 };
+const previewH = (node) => PREVIEW_SIZES[settingsOf(readMedia(node)).node.preview] || PREVIEW_H;
+// Nearest frame count on a grid, and one grid step up or down.
+function gridFrames(n, grid) {
+    n = Math.max(1, Math.round(n));
+    if (grid === "h3") return nearestH3Frames(n);
+    if (grid === "ltx") return Math.max(1, Math.round((n - 1) / 8) * 8 + 1);
+    return n;
+}
+function stepGrid(n, dir, grid) {
+    if (grid === "h3") return stepH3Frames(n, dir);
+    if (grid === "ltx") return Math.max(1, gridFrames(n, "ltx") + 8 * dir);
+    return Math.max(1, Math.round(n) + dir);
 }
 const NEW_CONT = { on: true, from: "folder", folder: "", file: "", take: "frames", frames: 22 };
 
@@ -410,6 +575,7 @@ function writeMedia(node, m) {
     if (m.pictures?.some((p) => p?.role === "key")) out.pictures = m.pictures;
     if (m.shot?.frames) out.shot = m.shot;
     if (m.continuation) out.continuation = m.continuation;   // kept while off, so settings survive a toggle
+    if (m.settings && Object.keys(m.settings).length) out.settings = m.settings;
     w.value = Object.keys(out).length ? JSON.stringify(out) : "";
     w.callback?.(w.value);
     node.graph?.setDirtyCanvas(true, true);
@@ -993,6 +1159,9 @@ function buildUI(node) {
         }
         node.setDirtyCanvas(true, true);
     };
+    // ⚙ — node-wide settings: target workflow, new-clip defaults, memory cap, sound, node.
+    const gearBtn = mkBtn("⚙", "", () => openSettings(node));
+    gearBtn.title = "Settings: target workflow (H3 / LTX / General), new-clip defaults, memory cap, nudge step, preview height";
     // The continuation: the end of the previous shot opens this one.
     const contBtn = mkBtn("↺ Continue", "", () => {
         const m = readMedia(node);
@@ -1040,7 +1209,7 @@ function buildUI(node) {
             const m = readMedia(node);
             const room = MAX_SOUNDS - m.audio.length;
             const names = await uploadFiles(sounds.slice(0, Math.max(0, room)));
-            for (const file of names) m.audio.push({ file, start: 0, duration: 0, fill: "silence" });
+            for (const file of names) m.audio.push({ file, start: 0, duration: 0, fill: settingsOf(m).audio.fill });
             if (names.length) { writeMedia(node, m); selAudio = m.audio.length - 1; selVideo = -1; }
             if (sounds.length > room) notice(`Room for ${MAX_SOUNDS} sounds; ${sounds.length - Math.max(0, room)} not added.`);
         }
@@ -1048,7 +1217,7 @@ function buildUI(node) {
             const m = readMedia(node);
             const room = MAX_VIDEOS - m.video.length;
             const names = await uploadFiles(clips.slice(0, Math.max(0, room)));
-            for (const file of names) m.video.push({ file, ...NEW_VIDEO });
+            for (const file of names) m.video.push({ file, ...NEW_VIDEO, ...settingsOf(m).video });   // ⚙ defaults
             if (names.length) { writeMedia(node, m); selVideo = m.video.length - 1; selAudio = -1; }
             if (clips.length > room) notice(`Room for ${MAX_VIDEOS} clips; ${clips.length - Math.max(0, room)} not added.`);
         }
@@ -1320,7 +1489,7 @@ function buildUI(node) {
         }
         if (selected >= paths.length) selected = 0;
         preview.style.display = "";
-        preview.style.height = PREVIEW_H + "px";
+        preview.style.height = previewH(node) + "px";
         const name = paths[selected];
         // Reuse the card's already-decoded copy: same URL, so the browser serves
         // it from cache instead of fetching the picture a second time.
@@ -1478,7 +1647,7 @@ function buildUI(node) {
     // A clip's length on the shot, in output frames — what the guide will hold.
     const clipLen = (c) => {
         const f = Math.max(1, Number(c.frames) || 124);
-        const n = (c.count || "target") === "target" ? nearestH3Frames(f) : f;
+        const n = (c.count || "target") === "target" ? gridFrames(f, targetOf(readMedia(node)).grid) : f;
         return Math.ceil(n / Math.max(1, Number(c.nth) || 1));
     };
 
@@ -1539,7 +1708,7 @@ function buildUI(node) {
         tl.querySelectorAll("[data-s]").forEach((b) => {
             b.onclick = () => {
                 const mm = readMedia(node);
-                mm.shot = { frames: Math.max(5, Math.min(362, S + 17 * Number(b.dataset.s))) };
+                mm.shot = { frames: Math.max(1, Math.min(1000, S + targetOf(mm).step * Number(b.dataset.s))) };
                 writeMedia(node, mm); render();
             };
         });
@@ -1567,7 +1736,10 @@ function buildUI(node) {
                 if (!d) return;
                 const moved = d.moved, a = d.cur;
                 d = null;
-                if (moved) setPlacement(kind, i, { at: a }); else pick(kind, i);
+                // LTX anchors a clip only at frame 0 or 8k+1: the drop lands on the nearest.
+                const at2 = moved && cls === "vid" && targetOf(readMedia(node)).grid === "ltx" && a > 0
+                    ? Math.min(Math.max(1, Math.round((a - 1) / 8) * 8 + 1), Math.max(0, S - len)) : a;
+                if (moved) setPlacement(kind, i, { at: at2 }); else pick(kind, i);
             };
             el.addEventListener("pointerup", up);
             el.addEventListener("pointercancel", up);
@@ -1615,7 +1787,7 @@ function buildUI(node) {
                 `Sound A${j + 1} ${role === "lock" ? "locked — the picture follows it" : "as a guide"}, from frame ${at}`, selAudio === j);
         });
         if (!refs.children.length) refs.innerHTML = `<span class="luna-al-tlnote">none — everything is on the shot</span>`;
-        q(".luna-al-tlnote").textContent = "MiniMax H3: pictures anchor at any frame; a clip must be 17k+5 frames and end inside the shot; "
+        q(".luna-al-tlnote").textContent = `${targetOf(m).label}: ${targetOf(m).note} `
             + "a sound runs from its frame to the end. H3 numbers only the references, in this order.";
     }
 
@@ -1680,6 +1852,9 @@ function buildUI(node) {
         aed.style.display = "";
         const idx = selAudio;
         const card = { fill: "silence", snap: "off", position: "free", song_start: 0, shot: 1, overlap: 22, ...media.audio[idx] };
+        // Snap a duration to the target's clip lengths; nudge by the ⚙ step.
+        const snapSeconds = (sec) => { const T = targetOf(media), fps = T.fps || H3_FPS; return gridFrames(sec * fps, T.grid) / fps; };
+        const nudge = () => Number(settingsOf(media).audio.nudge) || 0.1;
         const byShot = card.position === "shot";
         let start = Number(card.start) || 0, songStart = Number(card.song_start) || 0;
         let dur = Number(card.duration) || 0, info = null;
@@ -1752,8 +1927,8 @@ function buildUI(node) {
         });
         seg($(".ov"), [[5, "5 frames"], [22, "22 frames"], [39, "39 frames"]], Number(card.overlap), (v) => commit({ overlap: v }));
         seg($(".fill"), [["silence", "Silence"], ["loop", "Loop the song"]], card.fill, (v) => commit({ fill: v }));
-        seg($(".snap"), [["off", "Off"], ["h3", "H3 shot grid (17k+5 at 24 fps)"]], card.snap, (v) => {
-            commit({ snap: v, duration: v === "h3" && dur > 0 ? snapH3Seconds(dur) : dur });
+        seg($(".snap"), [["off", "Off"], ["h3", `${targetOf(media).gridText} shot lengths`]], card.snap, (v) => {
+            commit({ snap: v, duration: v === "h3" && dur > 0 ? snapSeconds(dur) : dur });
         });
         $(".snaprow").style.display = ws.wired ? "none" : "";
         $(".shotrow").style.display = $(".ovrow").style.display = byShot ? "" : "none";
@@ -1884,7 +2059,7 @@ function buildUI(node) {
             if (!drag) return;
             const resized = drag.edge !== "m";
             drag = null;
-            if (resized && card.snap === "h3") dur = snapH3Seconds(dur);
+            if (resized && card.snap === "h3") dur = snapSeconds(dur);
             commit();
         };
         win.addEventListener("pointerup", end);
@@ -1909,7 +2084,7 @@ function buildUI(node) {
         zoom.addEventListener("pointercancel", zEnd);
 
         aed.querySelectorAll("[data-n]").forEach((b) => {
-            b.onclick = () => { setWin(winStart() + 0.1 * Number(b.dataset.n)); commit(); };
+            b.onclick = () => { setWin(winStart() + nudge() * Number(b.dataset.n)); commit(); };
         });
         aed.querySelectorAll("[data-s]").forEach((b) => {
             b.onclick = () => {
@@ -1925,7 +2100,7 @@ function buildUI(node) {
         iDu.onchange = () => {
             if (ws.wired) return;
             const v = parseClock(iDu.value);
-            if (v != null && v > 0) dur = card.snap === "h3" ? snapH3Seconds(v) : v;
+            if (v != null && v > 0) dur = card.snap === "h3" ? snapSeconds(v) : v;
             commit();
         };
         iSn.onchange = () => {
@@ -2075,7 +2250,8 @@ function buildUI(node) {
         video.src = soundURL(card.file);
         strip.style.backgroundImage = `url("${stripURL(card.file, 16)}")`;
 
-        const outFps = () => card.fps === "target" ? H3_FPS : card.fps === "source" ? (mi?.fps || H3_FPS) : Number(card.fps);
+        const T = targetOf(media), grid = () => (card.count === "target" ? T.grid : "free");
+        const outFps = () => card.fps === "target" ? (T.fps || mi?.fps || H3_FPS) : card.fps === "source" ? (mi?.fps || H3_FPS) : Number(card.fps);
         const dur = () => mi?.duration || 0;
         const clipS = () => frames / outFps();
         const outSize = () => {
@@ -2089,7 +2265,7 @@ function buildUI(node) {
             return [ev(Math.round(mi.width * s)), ev(Math.round(mi.height * s))];
         };
         const clampStart = (t) => Math.max(0, Math.min(t, Math.max(0, dur() - Math.min(clipS(), dur()))));
-        const snapCount = (n) => card.count === "target" ? nearestH3Frames(n) : Math.max(1, Math.round(n));
+        const snapCount = (n) => gridFrames(n, grid());
 
         const seg = (host, opts, cur, pickOpt) => {
             host.replaceChildren();
@@ -2102,8 +2278,8 @@ function buildUI(node) {
             }
         };
         const opts = () => {
-            seg($(".fps"), [["target", "H3 (24)"], ["source", `Source${mi?.fps ? ` (${+mi.fps.toFixed(2)})` : ""}`], [24, "24"], [25, "25"], [30, "30"]], card.fps, (v) => commit({ fps: v }));
-            seg($(".cnt"), [["target", "H3 grid (17k+5)"], ["free", "Free"]], card.count, (v) => {
+            seg($(".fps"), [["target", T.fps ? `${T.label} (${T.fps})` : "Target = source"], ["source", `Source${mi?.fps ? ` (${+mi.fps.toFixed(2)})` : ""}`], [24, "24"], [25, "25"], [30, "30"]], card.fps, (v) => commit({ fps: v }));
+            seg($(".cnt"), [["target", T.gridText], ["free", "Free"]], card.count, (v) => {
                 card.count = v;
                 commit({ count: v, frames: snapCount(frames) });
             });
@@ -2138,8 +2314,9 @@ function buildUI(node) {
             const kept = Math.ceil(frames / Math.max(1, card.nth));
             const gb = w && h ? kept * w * h * 3 * (card.precision === "fp16" ? 2 : 4) / 1024 ** 3 : 0;
             let msg = w ? `Will decode <b>${kept} frames at ${w}×${h}</b> = <b>${gb.toFixed(2)} GB</b> as ${card.precision}.` : "";
-            if (gb > MEMORY_CAP_GB) msg += ` <span class="w">That is more than the ${MEMORY_CAP_GB} GB this node allows; the run will refuse it.</span>`;
-            if (card.count === "target" && Number(card.nth) > 1)
+            const capGB = Number(settingsOf(media).memory_gb) || MEMORY_CAP_GB;
+            if (gb > capGB) msg += ` <span class="w">That is more than the ${capGB} GB this node allows (⚙ Memory cap); the run will refuse it.</span>`;
+            if (grid() !== "free" && Number(card.nth) > 1)
                 msg += `<br><span class="w">Every Nth on the H3 grid makes H3 play the clip faster (it assumes 24 fps) and its sound no longer matches — the run refuses it. Keep every frame, or set Frames to Free.</span>`;
             if (card.size === "canvas" && !(ww.value > 0 && wh.value > 0))
                 msg += `<br><span class="w">Match canvas needs <b>width</b> and <b>height</b> wired; until then the clip keeps its shape at a 768 short edge.</span>`;
@@ -2215,7 +2392,7 @@ function buildUI(node) {
         });
         ved.querySelectorAll("[data-f]").forEach((b) => {
             b.onclick = () => {
-                frames = card.count === "target" ? stepH3Frames(frames, Number(b.dataset.f)) : Math.max(1, frames + Number(b.dataset.f));
+                frames = stepGrid(frames, Number(b.dataset.f), grid());
                 commit();
             };
         });
@@ -2307,7 +2484,7 @@ app.registerExtension({
                 }
                 // The preview is a fixed block, so it stays arithmetic like the
                 // rest — nothing here is measured from the rendered layout.
-                const pv = list.length ? PREVIEW_H + 6 : 0;
+                const pv = list.length ? previewH(this) + 6 : 0;
                 return Math.min(MAXH + tlh, Math.max(MINH, BAR + PAD + rows * CELL + pv + panel + tlh));
             };
             const w = this.addDOMWidget("luna_asset_cards", "div", ui.root, {

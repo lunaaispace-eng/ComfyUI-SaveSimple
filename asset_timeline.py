@@ -44,12 +44,31 @@ def h3_tags(pic_roles: list, clips: list, sound_roles: list) -> dict:
     return {"pictures": pictures, "videos": videos, "video_audio": video_audio, "sounds": sounds}
 
 
-def check_placements(shot: int, items: list) -> list:
+def target_fps(target: str, source_fps: float) -> float:
+    """The frame rate 'Target' means: MiniMax H3 hardcodes 24, LTX's conditioning
+    defaults to 25 (comfy_extras/nodes_lt.py LTXVConditioning), General keeps the
+    source's own rate."""
+    return {"h3": 24.0, "ltx": 25.0}.get(target, float(source_fps or 24.0))
+
+
+def target_grid(target: str) -> str:
+    """The clip-length grid 'Target' means: H3 17k+5, LTX 8k+1, General none."""
+    return {"h3": "h3", "ltx": "ltx"}.get(target, "free")
+
+
+def check_placements(shot: int, items: list, target: str = "h3") -> list:
     """Messages for every (label, at, length) that does not fit in a `shot`-frame
-    shot. Empty = all fit. A clip must END inside the shot, not just start there."""
+    shot. Empty = all fit. A clip must END inside the shot, not just start there.
+    LTX also anchors a multi-frame guide only at frame 0 or 8k+1 (LTXVAddGuide
+    rounds anything else, silently moving it)."""
     errors = []
     for label, at, length in items:
         at, length = int(at), max(1, int(length))
+        if target == "ltx" and length > 1 and at != 0 and (at - 1) % 8:
+            lo = ((at - 1) // 8) * 8 + 1
+            errors.append(f"{label} starts at frame {at}, but LTX anchors a clip only at frame 0 or 8k+1; "
+                          f"the nearest are {lo} or {lo + 8}.")
+            continue
         if at < 0 or at + length > shot:
             last = shot - length
             errors.append(
