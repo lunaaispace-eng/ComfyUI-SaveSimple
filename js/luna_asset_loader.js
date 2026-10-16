@@ -255,6 +255,21 @@ const soundURL = (name) => `/view?filename=${encodeURIComponent(name)}&type=inpu
 /* ------------------------------------------------------------- sound cards */
 
 const MEDIA_WIDGET = "media_state";
+const WIRED_INPUTS = ["seconds", "shot"];   // sockets whose value the song editor shows
+
+// The numbers on the nodes feeding `seconds` and `shot`, as one string. Checked on
+// every draw, so editing the Float/Int upstream moves the window straight away.
+function wiredSignature(node) {
+    const g = node.graph;
+    return WIRED_INPUTS.map((name) => {
+        const inp = node.inputs?.find((x) => x.name === name);
+        if (!inp || inp.link == null) return "-";
+        const l = g?.getLink?.(inp.link) ?? g?.links?.get?.(inp.link) ?? g?.links?.[inp.link];
+        const src = l && g.getNodeById(l.origin_id);
+        const w = src?.widgets?.find((x) => x.name === src.outputs?.[l.origin_slot]?.name) || src?.widgets?.find((x) => x.name === "value");
+        return String(w?.value ?? "?");
+    }).join("|");
+}
 const MAX_SOUNDS = 3;
 const H3_FPS = 24;
 const AUDIO_EXT = /\.(wav|mp3|flac|ogg|opus|m4a|aac|wma|aiff?)$/i;
@@ -1123,8 +1138,10 @@ function buildUI(node) {
     // plain number widget on the node at the other end (a Float primitive, a
     // canvas node's seconds); anything computed is only known after a run, so the
     // last run's value stands in, and the editor says which it is showing.
-    function wiredSeconds() {
-        const inp = node.inputs?.find((x) => x.name === "seconds");
+    function wiredSeconds() { return wiredNumber("seconds", (last) => last?.wired && last.seconds > 0 ? last.seconds : null); }
+    function wiredShot() { return wiredNumber("shot", (last) => last?.shot > 0 ? last.shot : null); }
+    function wiredNumber(name, fromLast) {
+        const inp = node.inputs?.find((x) => x.name === name);
         if (!inp || inp.link == null) return { wired: false, value: null, from: "" };
         let value = null, from = "the wire";
         try {
@@ -1137,11 +1154,23 @@ function buildUI(node) {
             if (w && Number.isFinite(Number(w.value)) && Number(w.value) > 0) value = Number(w.value);
         } catch { /* graph mid-change: fall back to the last run */ }
         if (value == null) {
-            const last = _lastSong.get(node.id);
-            if (last?.wired && last.seconds > 0) { value = last.seconds; from += ", last run"; }
+            const v = fromLast(_lastSong.get(node.id));
+            if (v != null) { value = v; from += ", last run"; }
         }
         return { wired: true, value, from };
     }
+
+    // Shot mode: shot n's window starts at song_start + (n-1) x (shot length - overlap).
+    const shotStep = (len, overlap) => len - overlap / H3_FPS;
+    const shotCount = (T, songStart, len, overlap) => {
+        const step = shotStep(len, overlap);
+        return step > 0 && T > songStart ? Math.ceil((T - songStart) / step) : 0;
+    };
+    // Rows of the editor beyond the base, for the node's arithmetic height.
+    const audioExtraRows = () => {
+        const c = readMedia(node).audio[selAudio];
+        return 1 + (c?.position === "shot" ? 2 : 0);
+    };
 
     let player = null, playRaf = 0;
     function stopPlay() {
@@ -1161,9 +1190,13 @@ function buildUI(node) {
             return;
         }
         aed.style.display = "";
-        const idx = selAudio, card = { fill: "silence", snap: "off", ...media.audio[idx] };
-        let start = Number(card.start) || 0, dur = Number(card.duration) || 0, info = null;
-        const ws = wiredSeconds();
+        const idx = selAudio;
+        const card = { fill: "silence", snap: "off", position: "free", song_start: 0, shot: 1, overlap: 22, ...media.audio[idx] };
+        const byShot = card.position === "shot";
+        let start = Number(card.start) || 0, songStart = Number(card.song_start) || 0;
+        let dur = Number(card.duration) || 0, info = null;
+        const ws = wiredSeconds(), wsh = wiredShot();
+        const shotNo = () => Math.max(1, Math.round(wsh.wired && wsh.value > 0 ? wsh.value : Number(card.shot) || 1));
 
         aed.innerHTML = `
             <div class="luna-al-ahead"><b>A${idx + 1}</b><span class="nm"></span><span class="sp"></span><span class="meta">reading the song…</span>
@@ -1173,10 +1206,14 @@ function buildUI(node) {
             <div class="luna-al-zlbl"><span>Zoom on the window (± 1 s) · drag to fine-tune the start</span><span class="zr"></span></div>
             <div class="luna-al-zoom"><canvas></canvas><div class="luna-al-ph"></div></div>
             <div class="luna-al-nums">
-              <span class="l">Start</span><div class="luna-al-nf"><span class="luna-al-nud" data-n="-1" title="0.1 s earlier">◀</span><input class="st"><span class="luna-al-nud" data-n="1" title="0.1 s later">▶</span></div>
-              <span class="l">Duration</span><div class="luna-al-nf"><input class="du"><span class="luna-al-lock"></span></div>
-              <span class="l">End</span><div class="luna-al-nf"><input class="en" readonly tabindex="-1"></div><span></span><span></span>
+              <span class="l stl">Start</span><div class="luna-al-nf"><span class="luna-al-nud" data-n="-1" title="0.1 s earlier">◀</span><input class="st"><span class="luna-al-nud" data-n="1" title="0.1 s later">▶</span></div>
+              <span class="l">Duration</span><div class="luna-al-nf"><input class="du"><span class="luna-al-lock dl"></span></div>
+              <span class="l">Window</span><div class="luna-al-nf"><input class="en" readonly tabindex="-1" style="width:120px"></div><span></span><span></span>
             </div>
+            <div class="luna-al-row"><div class="luna-al-lbl">Position</div><div class="luna-al-seg pos"></div></div>
+            <div class="luna-al-row shotrow"><div class="luna-al-lbl">Shot</div>
+              <div class="luna-al-nf"><span class="luna-al-nud" data-s="-1" title="Previous shot">◀</span><input class="sn" style="width:46px"><span class="luna-al-nud" data-s="1" title="Next shot">▶</span><span class="luna-al-lock sl"></span></div></div>
+            <div class="luna-al-row ovrow"><div class="luna-al-lbl">Overlap</div><div class="luna-al-seg ov"></div></div>
             <div class="luna-al-row"><div class="luna-al-lbl">Song ends</div><div class="luna-al-seg fill"></div></div>
             <div class="luna-al-row snaprow"><div class="luna-al-lbl">Snap</div><div class="luna-al-seg snap"></div></div>
             <div class="luna-al-astat"></div>`;
@@ -1184,12 +1221,22 @@ function buildUI(node) {
         $(".nm").textContent = card.file;
         const wave = $(".luna-al-wave"), win = $(".luna-al-win"), zoom = $(".luna-al-zoom");
         const [phW, phZ] = aed.querySelectorAll(".luna-al-ph");
-        const iSt = $(".st"), iDu = $(".du"), iEn = $(".en");
+        const iSt = $(".st"), iDu = $(".du"), iEn = $(".en"), iSn = $(".sn");
 
         const total = () => info?.duration || 0;
         // dur 0 means "to the end of the file"; a wired seconds input wins over both.
-        const eff = () => (ws.wired && ws.value > 0) ? ws.value : (dur > 0 ? dur : Math.max(0, total() - start));
-        const clampStart = (t) => Math.max(0, Math.min(t, Math.max(0, total() - Math.min(eff(), total()))));
+        const eff = () => (ws.wired && ws.value > 0) ? ws.value
+            : (dur > 0 ? dur : (byShot ? 0 : Math.max(0, total() - start)));
+        const step = () => shotStep(eff(), Number(card.overlap) || 0);
+        // The window this run uses. In shot mode it is derived from where shot 1 begins.
+        const winStart = () => byShot ? songStart + (shotNo() - 1) * step() : start;
+        const clampWin = (t) => Math.max(byShot ? (shotNo() - 1) * Math.max(0, step()) : 0,
+            Math.min(t, Math.max(0, total() - Math.min(eff(), total()))));
+        // Moving the window: free mode moves it; shot mode moves every shot together.
+        const setWin = (t) => {
+            const c = clampWin(t);
+            if (byShot) songStart = Math.max(0, c - (shotNo() - 1) * step()); else start = c;
+        };
 
         const seg = (host, opts, cur, pick) => {
             host.replaceChildren();
@@ -1201,59 +1248,104 @@ function buildUI(node) {
                 host.appendChild(o);
             }
         };
+        seg($(".pos"), [["free", "Free"], ["shot", "By shot number"]], card.position, (v) => {
+            if (v === card.position) return;
+            if (v === "shot") {
+                // Start from what is on screen: this window becomes shot 1, and a
+                // whole-song window becomes one H3 shot (124 frames) rather than nothing.
+                if (!ws.wired && !(dur > 0)) dur = 124 / H3_FPS;
+                commit({ position: "shot", song_start: +start.toFixed(6), shot: 1, duration: +dur.toFixed(6) });
+            } else commit({ position: "free", start: +winStart().toFixed(6) });
+        });
+        seg($(".ov"), [[5, "5 frames"], [22, "22 frames"], [39, "39 frames"]], Number(card.overlap), (v) => commit({ overlap: v }));
         seg($(".fill"), [["silence", "Silence"], ["loop", "Loop the song"]], card.fill, (v) => commit({ fill: v }));
         seg($(".snap"), [["off", "Off"], ["h3", "H3 shot grid (17k+5 at 24 fps)"]], card.snap, (v) => {
             commit({ snap: v, duration: v === "h3" && dur > 0 ? snapH3Seconds(dur) : dur });
         });
         $(".snaprow").style.display = ws.wired ? "none" : "";
+        $(".shotrow").style.display = $(".ovrow").style.display = byShot ? "" : "none";
+        $(".stl").textContent = byShot ? "Song start" : "Start";
 
         function commit(patch = {}) {
             const m = readMedia(node);
             if (!m.audio[idx]) return;
-            m.audio[idx] = { ...m.audio[idx], start: +start.toFixed(3), duration: +dur.toFixed(3), ...patch };
+            m.audio[idx] = { ...m.audio[idx], start: +start.toFixed(6), song_start: +songStart.toFixed(6),
+                             duration: +dur.toFixed(6), ...patch };
             writeMedia(node, m);
             render();
         }
 
         function draw() {
-            const e = eff(), T = total();
-            iSt.value = clock(start);
+            const e = eff(), T = total(), a = winStart(), n = shotNo();
+            const N = byShot && T ? shotCount(T, songStart, e, Number(card.overlap) || 0) : 0;
+            iSt.value = clock(byShot ? songStart : start);
             iDu.value = `${e.toFixed(2)} s`;
-            iEn.value = clock(start + e);
+            iEn.value = `${clock(a)} – ${clock(a + e)}`;
             iDu.readOnly = ws.wired;
             iDu.classList.toggle("lockd", ws.wired);
-            $(".luna-al-lock").textContent = ws.wired
+            $(".dl").textContent = ws.wired
                 ? (ws.value > 0 ? `🔒 ${Math.round(e * H3_FPS)} frames · ${ws.from}` : `🔒 set by ${ws.from} — known after a run`)
                 : `${Math.round(e * H3_FPS)} frames at 24 fps`;
+            iSn.value = String(n);
+            iSn.readOnly = wsh.wired;
+            iSn.classList.toggle("lockd", wsh.wired);
+            $(".sl").textContent = wsh.wired
+                ? (wsh.value > 0 ? `🔒 from ${wsh.from}` : `🔒 set by ${wsh.from} — known after a run`)
+                : (N ? `of ${N}` : "");
             win.classList.toggle("locked", ws.wired);
             if (T) {
                 const W = wave.getBoundingClientRect().width;
-                win.style.left = `${Math.min(start, T) / T * W}px`;
-                win.style.width = `${Math.max(3, Math.min(e, Math.max(0, T - start)) / T * W)}px`;
-                $(".tag").textContent = `${e.toFixed(2)} s`;
-                drawWave(wave.querySelector("canvas"), info, 0, T, start, start + e);
-                const z0 = start - 1, z1 = start + e + 1;
-                drawWave(zoom.querySelector("canvas"), info, z0, z1, start, start + e, { grid: true, step: 1 });
+                win.style.left = `${Math.min(a, T) / T * W}px`;
+                win.style.width = `${Math.max(3, Math.min(e, Math.max(0, T - a)) / T * W)}px`;
+                $(".tag").textContent = byShot ? `shot ${n} · ${e.toFixed(2)} s` : `${e.toFixed(2)} s`;
+                const cv = wave.querySelector("canvas");
+                drawWave(cv, info, 0, T, a, a + e);
+                if (byShot && step() > 0) drawShotStrip(cv, T, N, n, e);
+                const z0 = a - 1, z1 = a + e + 1;
+                drawWave(zoom.querySelector("canvas"), info, z0, z1, a, a + e, { grid: true, step: 1 });
                 $(".zr").textContent = `${clock(Math.max(0, z0))} – ${clock(z1)}`;
             }
-            const short = T ? start + e - T : 0;
             const last = _lastSong.get(node.id);
-            let msg = ws.wired
+            let msg;
+            if (byShot && step() <= 0)
+                msg = `<span class="w">The overlap is as long as the shot, so the song would never move on. Choose a smaller overlap.</span>`;
+            else if (byShot && T && a >= T)
+                msg = `<span class="w">Shot ${n} would start at ${clock(a)}, after the song ends (${clock(T)}). This song has ${N} shot(s); the run will stop with that message.</span>`;
+            else if (byShot)
+                msg = `Shot <b>${n}</b>${N ? ` of ${N}` : ""} uses the song from <b>${clock(a)}</b> to <b>${clock(a + e)}</b>`
+                    + (n > 1 && Number(card.overlap) ? `, sharing its first ${(Number(card.overlap) / H3_FPS).toFixed(2)} s with shot ${n - 1}` : "")
+                    + `. Each shot starts ${step().toFixed(2)} s after the one before. Change the shot number${wsh.wired ? "" : " (or wire <b>shot</b>)"} and the window follows; dragging moves every shot together.`;
+            else msg = ws.wired
                 ? `The duration comes from the <b>seconds</b> input, so the song always matches the shot. Move the window or type a start.`
                 : `Drag the window to choose the part; drag its edges or type Start and Duration.`;
+            const short = T && a < T ? a + e - T : 0;
             if (short > 0.005)
                 msg += `<br><span class="w">The song ends ${short.toFixed(2)} s before the window does; that part will be ${card.fill === "loop" ? "the song again from its start" : "silence"}.</span>`;
             if (last && last.name === card.file)
-                msg += `<br>Last run: ${clock(last.start)}–${clock(last.start + last.seconds)}, ${last.seconds.toFixed(2)} s${last.filled > 0.0005 ? `, ${last.filled.toFixed(2)} s filled` : ""}.`;
+                msg += `<br>Last run: ${last.shot ? `shot ${last.shot}, ` : ""}${clock(last.start)}–${clock(last.start + last.seconds)}, ${last.seconds.toFixed(2)} s${last.filled > 0.0005 ? `, ${last.filled.toFixed(2)} s filled` : ""}.`;
             $(".luna-al-astat").innerHTML = msg;
+        }
+
+        // Every shot's window as a thin strip along the top of the song; the current one in pink.
+        function drawShotStrip(cv, T, N, n, e) {
+            if (!cv?.isConnected) return;
+            const g = cv.getContext("2d"), W = cv.getBoundingClientRect().width;
+            g.font = "9px Segoe UI, system-ui, sans-serif";
+            for (let k = 1; k <= N; k++) {
+                const s = songStart + (k - 1) * step();
+                const x0 = s / T * W, x1 = Math.min(T, s + e) / T * W, cur = k === n;
+                g.fillStyle = cur ? "#e07bb4" : (k % 2 ? "#3a3d48" : "#4f5361");
+                g.fillRect(x0, k % 2 ? 1 : 5, Math.max(1, x1 - x0), 3);
+                if (cur || k === 1 || k === N) { g.fillStyle = cur ? "#e07bb4" : "#8b8e99"; g.fillText(String(k), x0 + 1, 17); }
+            }
         }
 
         const ruler = () => {
             const T = total(), r = $(".luna-al-ruler");
             r.replaceChildren();
             if (!T) return;
-            const step = T > 240 ? 60 : T > 90 ? 30 : T > 30 ? 10 : 5;
-            for (let t = 0; t <= T; t += step) {
+            const stp = T > 240 ? 60 : T > 90 ? 30 : T > 30 ? 10 : 5;
+            for (let t = 0; t <= T; t += stp) {
                 const s = document.createElement("span");
                 s.style.left = `${t / T * 100}%`;
                 s.textContent = clock(t).replace(/\.\d+$/, "");
@@ -1273,24 +1365,26 @@ function buildUI(node) {
         }).catch(() => { $(".meta").textContent = "this file cannot be read by the browser"; });
         draw();
 
-        // Window: the body moves it, the edges resize it (not while seconds is wired).
+        // Window: the body moves it, the edges resize it (not while seconds is wired;
+        // in shot mode only the right edge, which is the shot length).
         let drag = null;
         win.addEventListener("pointerdown", (e) => {
             if (!info) return;
             const edge = e.target.classList.contains("h") ? (e.target.classList.contains("l") ? "l" : "r") : "m";
             if (edge !== "m" && ws.wired) { notice("The duration comes from the seconds input."); return; }
-            drag = { edge, x: e.clientX, s: start, d: eff() };
+            if (edge === "l" && byShot) { notice("In shot mode the window starts where the shot number puts it."); return; }
+            drag = { edge, x: e.clientX, a: winStart(), d: eff() };
             win.setPointerCapture(e.pointerId);
             e.preventDefault();
         });
         win.addEventListener("pointermove", (e) => {
             if (!drag) return;
             const T = total(), dt = (e.clientX - drag.x) / wave.getBoundingClientRect().width * T;
-            if (drag.edge === "m") start = clampStart(drag.s + dt);
+            if (drag.edge === "m") setWin(drag.a + dt);
             else if (drag.edge === "l") {
-                start = Math.max(0, Math.min(drag.s + drag.d - 0.1, drag.s + dt));
-                dur = drag.s + drag.d - start;
-            } else dur = Math.max(0.1, Math.min(T - drag.s, drag.d + dt));
+                start = Math.max(0, Math.min(drag.a + drag.d - 0.1, drag.a + dt));
+                dur = drag.a + drag.d - start;
+            } else dur = Math.max(0.1, Math.min(T - drag.a, drag.d + dt));
             draw();
         });
         const end = () => {
@@ -1306,32 +1400,47 @@ function buildUI(node) {
         wave.addEventListener("pointerdown", (e) => {
             if (!info || win.contains(e.target)) return;
             const r = wave.getBoundingClientRect();
-            start = clampStart((e.clientX - r.left) / r.width * total() - eff() / 2);
+            setWin((e.clientX - r.left) / r.width * total() - eff() / 2);
             commit();
         });
-        // The zoom strip pans the start finely: the song moves with the hand.
+        // The zoom strip pans the window finely: the song moves with the hand.
         let zd = null;
-        zoom.addEventListener("pointerdown", (e) => { if (!info) return; zd = { x: e.clientX, s: start }; zoom.setPointerCapture(e.pointerId); });
+        zoom.addEventListener("pointerdown", (e) => { if (!info) return; zd = { x: e.clientX, a: winStart() }; zoom.setPointerCapture(e.pointerId); });
         zoom.addEventListener("pointermove", (e) => {
             if (!zd) return;
-            start = clampStart(zd.s - (e.clientX - zd.x) / zoom.getBoundingClientRect().width * (eff() + 2));
+            setWin(zd.a - (e.clientX - zd.x) / zoom.getBoundingClientRect().width * (eff() + 2));
             draw();
         });
         const zEnd = () => { if (zd) { zd = null; commit(); } };
         zoom.addEventListener("pointerup", zEnd);
         zoom.addEventListener("pointercancel", zEnd);
 
-        aed.querySelectorAll(".luna-al-nud").forEach((b) => {
-            b.onclick = () => { start = clampStart(start + 0.1 * Number(b.dataset.n)); commit(); };
+        aed.querySelectorAll("[data-n]").forEach((b) => {
+            b.onclick = () => { setWin(winStart() + 0.1 * Number(b.dataset.n)); commit(); };
         });
-        iSt.onchange = () => { const v = parseClock(iSt.value); if (v != null) start = clampStart(v); commit(); };
+        aed.querySelectorAll("[data-s]").forEach((b) => {
+            b.onclick = () => {
+                if (wsh.wired) { notice("The shot number comes from the shot input."); return; }
+                commit({ shot: Math.max(1, (Number(card.shot) || 1) + Number(b.dataset.s)) });
+            };
+        });
+        iSt.onchange = () => {
+            const v = parseClock(iSt.value);
+            if (v != null) { if (byShot) songStart = Math.max(0, v); else start = clampWin(v); }
+            commit();
+        };
         iDu.onchange = () => {
             if (ws.wired) return;
             const v = parseClock(iDu.value);
             if (v != null && v > 0) dur = card.snap === "h3" ? snapH3Seconds(v) : v;
             commit();
         };
-        for (const inp of [iSt, iDu]) inp.addEventListener("keydown", (e) => { if (e.key === "Enter") inp.blur(); });
+        iSn.onchange = () => {
+            if (wsh.wired) return;
+            const v = Math.round(Number(iSn.value));
+            commit(Number.isFinite(v) && v >= 1 ? { shot: v } : {});
+        };
+        for (const inp of [iSt, iDu, iSn]) inp.addEventListener("keydown", (e) => { if (e.key === "Enter") inp.blur(); });
 
         $(".luna-al-play").onclick = () => {
             if (!info) return;
@@ -1339,7 +1448,7 @@ function buildUI(node) {
             player = player || new Audio();
             const src = soundURL(card.file);
             if (!player.src.endsWith(src)) player.src = src;
-            const a = start, b = start + Math.min(eff(), total() - start);
+            const a = winStart(), b = a + Math.min(eff(), total() - a);
             player.currentTime = a;
             player.play().catch(() => notice("The browser would not start playback."));
             $(".luna-al-play").textContent = "■";
@@ -1356,7 +1465,8 @@ function buildUI(node) {
         };
     }
 
-    return { root, render, selectCard: (i) => { selected = i; renderPanel(); }, natural, audioOpen: () => selAudio >= 0 };
+    return { root, render, selectCard: (i) => { selected = i; renderPanel(); }, natural,
+             audioOpen: () => selAudio >= 0, audioExtraRows };
 }
 
 /* ---------------------------------------------------------------- register */
@@ -1390,7 +1500,10 @@ app.registerExtension({
                 const sounds = readMedia(this).audio.length;
                 const cols = Math.max(1, Math.floor((this.size[0] - 24) / CELL));
                 const rows = Math.max(1, Math.ceil((list.length + sounds) / cols));
-                if (ui.audioOpen()) return Math.min(MAXH + AUDIO_H, BAR + PAD + rows * CELL + AUDIO_H);
+                if (ui.audioOpen()) {
+                    const h = AUDIO_H + ui.audioExtraRows() * 28;   // Position, then Shot + Overlap in shot mode
+                    return Math.min(MAXH + h, BAR + PAD + rows * CELL + h);
+                }
                 // The resize panel only exists once there is something to resize,
                 // and grows a row when a mode or a ratio is chosen.
                 let panel = 0;
@@ -1476,13 +1589,14 @@ app.registerExtension({
             return r;
         };
 
-        // Wiring or unwiring `seconds` locks or frees the song's duration at once.
+        // Wiring or unwiring `seconds` / `shot` locks or frees the song's duration
+        // and shot number at once.
         const onConn = nodeType.prototype.onConnectionsChange;
         nodeType.prototype.onConnectionsChange = function (type, slot, connected, link, ioSlot) {
             const r = onConn?.apply(this, arguments);
             // setTimeout, not requestAnimationFrame: a background tab never runs the
             // latter, and the lock must be right whenever the node is next seen.
-            if (ioSlot?.name === "seconds") setTimeout(() => this._lunaRender?.(), 0);
+            if (WIRED_INPUTS.includes(ioSlot?.name)) setTimeout(() => this._lunaRender?.(), 0);
             return r;
         };
 
@@ -1492,6 +1606,12 @@ app.registerExtension({
         nodeType.prototype.onDrawForeground = function (ctx) {
             const r = onDraw?.apply(this, arguments);
             if (this._lunaRoot) syncAccent(this, this._lunaRoot);
+            const sig = wiredSignature(this);
+            if (sig !== this._lunaWiredSig) {
+                const first = this._lunaWiredSig === undefined;
+                this._lunaWiredSig = sig;
+                if (!first) setTimeout(() => this._lunaRender?.(), 0);
+            }
             if (!this.flags?.collapsed && ctx) drawCtl(this, ctx);
             return r;
         };

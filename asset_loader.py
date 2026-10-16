@@ -64,7 +64,7 @@ from PIL import Image, ImageOps
 import folder_paths
 import node_helpers
 
-from .media_io import FPS, load_audio_window
+from .media_io import FPS, load_audio_window, song_shot_count, song_shot_start
 
 MAX_IMAGES = 9  # MiniMax H3's own reference ceiling
 MAX_SOUNDS = 3  # MiniMax H3 takes three standalone sounds
@@ -165,6 +165,12 @@ def _parse_media(raw: str) -> dict:
             "start": max(0.0, float(c.get("start") or 0.0)),
             "duration": max(0.0, float(c.get("duration") or 0.0)),
             "fill": "loop" if c.get("fill") == "loop" else "silence",
+            # Song position: "free" = the window is where start says; "shot" = the
+            # window follows the shot number from song_start, `overlap` frames shared.
+            "position": "shot" if c.get("position") == "shot" else "free",
+            "song_start": max(0.0, float(c.get("song_start") or 0.0)),
+            "shot": max(1, int(c.get("shot") or 1)),
+            "overlap": max(0, int(c.get("overlap") if c.get("overlap") is not None else 22)),
         })
     return {"audio": cards}
 
@@ -359,6 +365,10 @@ class LunaAssetLoader:
                     "forceInput": True,
                     "tooltip": "The shot length in seconds. Wired, it sets the song window's duration, so the song always matches the shot; the window then only moves. Unwired, the duration on the sound card is used.",
                 }),
+                "shot": ("INT", {
+                    "forceInput": True,
+                    "tooltip": "Which shot of the song this run makes, counting from 1. Only used when the sound card's Position is 'By shot number': shot n starts where shot n-1 started plus the shot length minus the overlap. Unwired, the shot number on the sound card is used.",
+                }),
             },
         }
 
@@ -394,7 +404,7 @@ class LunaAssetLoader:
                     f"but {len(paths)} lines are listed.")
         return True
 
-    def load(self, image_paths, image_count, asset_state="", media_state="", seconds=None):
+    def load(self, image_paths, image_count, asset_state="", media_state="", seconds=None, shot=None):
         paths = _split_paths(image_paths)
         cards = _parse_media(media_state)["audio"]
         if not paths and not cards:
@@ -402,7 +412,7 @@ class LunaAssetLoader:
                 "[Luna Asset Loader] Nothing loaded. Press Upload and add pictures or a song."
             )
 
-        audio, song, song_line = self._song(cards, seconds)
+        audio, song, song_line = self._song(cards, seconds, shot)
         if not paths:
             # A song on its own is a real use (the picture comes from elsewhere), so
             # this is not an error — but the picture outputs stay empty, never black.
@@ -462,7 +472,7 @@ class LunaAssetLoader:
         return {"ui": {"luna_asset_audio": [song] if song else []}, "result": result}
 
     @staticmethod
-    def _song(cards, seconds):
+    def _song(cards, seconds, shot=None):
         """Sound card 1 -> (AUDIO or None, info dict or None, one brief line)."""
         if not cards:
             return None, None, ""
@@ -472,10 +482,37 @@ class LunaAssetLoader:
             raise RuntimeError(f"[Luna Asset Loader] Song not found in the input folder: {c['file']}")
         wired = seconds is not None and float(seconds) > 0
         want = float(seconds) if wired else c["duration"]
-        audio, info = load_audio_window(path, c["start"], want, c["fill"])
+        start, describe, n = c["start"], None, None
+        if c["position"] == "shot":
+            if want <= 0:
+                raise RuntimeError(
+                    "[Luna Asset Loader] 'By shot number' needs a shot length: wire `seconds` "
+                    "or give the sound card a Duration.")
+            n = int(shot) if shot is not None and int(shot) > 0 else c["shot"]
+            try:
+                start = song_shot_start(c["song_start"], n, want, c["overlap"])
+            except ValueError as e:
+                raise RuntimeError(f"[Luna Asset Loader] {e} Lower the overlap.") from None
+
+            def describe(total_s, _n=n):
+                count = song_shot_count(total_s, c["song_start"], want, c["overlap"])
+                return (f"[Luna Asset Loader] Shot {_n} would start at {_clock(start)}, after "
+                        f"{c['file']} ends ({_clock(total_s)}). This song has {count} shot(s) of "
+                        f"{want:.2f} s with a {c['overlap']}-frame overlap, starting at "
+                        f"{_clock(c['song_start'])}.")
+        audio, info = load_audio_window(path, start, want, c["fill"], describe)
         info["wired"] = wired
         line = (f"Song: {info['name']} {_clock(info['start'])}-{_clock(info['start'] + info['seconds'])} "
                 f"({info['seconds']:.2f} s).")
+        if n is not None:
+            info["shot"] = n
+            info["shots"] = song_shot_count(info["total"], c["song_start"], want, c["overlap"])
+            info["overlap"] = c["overlap"]
+            line = (f"Song: {info['name']}, shot {n} of {info['shots']}, "
+                    f"{_clock(info['start'])}-{_clock(info['start'] + info['seconds'])} "
+                    f"({info['seconds']:.2f} s"
+                    + (f", sharing its first {c['overlap']} frames with shot {n - 1}" if n > 1 and c["overlap"] else "")
+                    + ").")
         if info["filled"] > 0.0005:
             line += (f" The file ran out after {info['taken']:.2f} s; the last {info['filled']:.2f} s "
                      f"{'loop back to its start' if info['mode'] == 'loop' else 'are silence'}.")
@@ -487,8 +524,11 @@ class LunaAssetLoader:
         """Placements on the shot, in frames at H3's 24 fps. v1 holds only the song."""
         items = []
         if song:
-            items.append({"kind": "audio", "role": "lock", "at": 0, "file": song["name"],
-                          "start": round(song["start"], 4), "seconds": round(song["seconds"], 4)})
+            item = {"kind": "audio", "role": "lock", "at": 0, "file": song["name"],
+                    "start": round(song["start"], 4), "seconds": round(song["seconds"], 4)}
+            if song.get("shot") is not None:
+                item.update({"shot": song["shot"], "shots": song["shots"], "overlap_frames": song["overlap"]})
+            items.append(item)
         shot = float(seconds) if seconds is not None and float(seconds) > 0 else None
         return {"version": 1, "fps": FPS,
                 "frames": int(round(shot * FPS)) if shot else None, "items": items}

@@ -28,6 +28,7 @@ is always present in a working ComfyUI; this adds no dependency.
 
 from __future__ import annotations
 
+import math
 import os
 
 import numpy as np
@@ -239,19 +240,54 @@ def apply_window(waveform: torch.Tensor, plan: dict, when_short: str = "silence"
     return torch.cat(parts, dim=-1)
 
 
-def load_audio_window(path: str, start_s: float, seconds: float, when_short: str = "silence"):
-    """One sound file -> ({"waveform": [1, C, L], "sample_rate": sr}, info), exactly `seconds` long."""
+# --- a song cut into shots ---------------------------------------------------------
+# A music video is many shots of one song. Shot n starts where shot n-1 started plus
+# the shot length minus the overlap, so neighbouring shots share `overlap` frames of
+# song — the same frames the continuation carries over in the picture, so sound and
+# picture line up at every cut. Overlap is counted in frames at H3's 24 fps.
+
+def _shot_step(shot_s: float, overlap_frames: int, fps: int = FPS) -> float:
+    step = float(shot_s) - int(overlap_frames) / float(fps)
+    if step <= 0:
+        raise ValueError(
+            f"The overlap ({int(overlap_frames)} frames = {int(overlap_frames) / fps:.2f} s) is as "
+            f"long as the shot ({float(shot_s):.2f} s), so the song would never move on.")
+    return step
+
+
+def song_shot_start(song_start_s: float, shot: int, shot_s: float, overlap_frames: int,
+                    fps: int = FPS) -> float:
+    """Where in the song shot `shot` (1-based) begins."""
+    return float(song_start_s) + (max(1, int(shot)) - 1) * _shot_step(shot_s, overlap_frames, fps)
+
+
+def song_shot_count(total_s: float, song_start_s: float, shot_s: float, overlap_frames: int,
+                    fps: int = FPS) -> int:
+    """How many shots start inside the song. The last may run past the end and be filled."""
+    if float(song_start_s) >= float(total_s):
+        return 0
+    return int(math.ceil((float(total_s) - float(song_start_s)) / _shot_step(shot_s, overlap_frames, fps)))
+
+
+def load_audio_window(path: str, start_s: float, seconds: float, when_short: str = "silence",
+                      describe_empty=None):
+    """One sound file -> ({"waveform": [1, C, L], "sample_rate": sr}, info), exactly `seconds` long.
+
+    `describe_empty(total_s)` words the error when the window starts past the end —
+    a caller that knows WHY (a shot number past the song) can say so."""
     waveform, sample_rate = _decode_audio(path)
     if waveform.ndim == 1:
         waveform = waveform.unsqueeze(0)
     sr = int(sample_rate or 1)
     plan = plan_window(int(waveform.shape[-1]), sr, start_s, seconds)
     if plan["take"] <= 0:
-        raise RuntimeError(
+        total_s = waveform.shape[-1] / sr
+        raise RuntimeError(describe_empty(total_s) if describe_empty else (
             f"[Luna Asset Loader] The window on {os.path.basename(path)} contains no audio: "
             f"it starts at {plan['start'] / sr:.2f}s but the file is only "
-            f"{waveform.shape[-1] / sr:.2f}s long. Drag the window back into the song."
-        )
+            f"{total_s:.2f}s long. Drag the window back into the song."
+        ))
+    info_total = waveform.shape[-1] / sr
     clip = apply_window(waveform, plan, when_short)
     return {"waveform": clip.unsqueeze(0), "sample_rate": sr}, {
         "name": os.path.basename(path),
@@ -262,6 +298,7 @@ def load_audio_window(path: str, start_s: float, seconds: float, when_short: str
         "mode": "loop" if when_short == "loop" else "silence",
         "sample_rate": sr,
         "channels": int(clip.shape[0]),
+        "total": info_total,
     }
 
 

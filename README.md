@@ -270,11 +270,26 @@ Upload a sound file (wav, mp3, flac, ogg, m4a …) and it becomes a pink sound c
 | **Start / Duration / End** | the same window as numbers (`1:23.45` or seconds); ◀ ▶ move it by 0.1 s |
 | **Song ends** | what fills the window when it runs past the end of the file: silence, or the song again from its start — the editor and the run both say when this happens |
 | **Snap** | snap the duration to MiniMax H3 shot lengths (17k+5 frames at 24 fps) |
+| **Position** | **Free**: the window is where you put it. **By shot number**: the song is cut into shots — see below |
 | **▶** | plays the window |
 
 Wire **`seconds`** (the shot length) and the duration is locked to it — the song
 then always matches the shot, and only the start moves. `audio` delivers exactly
 that window, sample for sample.
+
+### A music video: one song, many shots
+
+Set **Position** to **By shot number** and the window follows the shot number:
+shot *n* starts where shot *n − 1* started plus the shot length minus the
+**overlap** (5, 22 or 39 frames — MiniMax H3 clips are 17k+5). Neighbouring shots
+share that much song, the same frames a continuation carries over in the picture,
+so sound and picture line up at every cut.
+
+- **Shot ◀ n ▶** picks the shot; wire the **`shot`** input (an Int) to drive it
+  from outside. The editor says *of N* — how many shots start inside the song.
+- **Song start** is where shot 1 begins. Dragging the window moves every shot
+  together. A thin strip on top of the song shows every shot's window.
+- A shot number past the end of the song stops the run with the shot count.
 
 ## Per-image resize
 

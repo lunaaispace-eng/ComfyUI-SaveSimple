@@ -11,7 +11,7 @@ import unittest
 import torch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from media_io import apply_window, plan_window  # noqa: E402
+from media_io import apply_window, plan_window, song_shot_count, song_shot_start  # noqa: E402
 
 SR44, SR48 = 44100, 48000
 
@@ -71,6 +71,36 @@ class ApplyWindowTests(unittest.TestCase):
         self.assertEqual(out.shape[-1], 170)
         self.assertTrue(torch.equal(out[:, 50:100], wav))
         self.assertTrue(torch.equal(out[:, 150:170], wav[:, :20]))
+
+
+class SongByShotTests(unittest.TestCase):
+    """Shot n of a song starts where shot n-1 started plus (shot length - overlap)."""
+
+    SHOT = 124 / 24          # 5.1666… s, H3's default 124-frame shot
+
+    def test_shot_one_starts_at_the_song_start(self):
+        self.assertAlmostEqual(song_shot_start(12.0, 1, self.SHOT, 22), 12.0)
+
+    def test_each_shot_advances_by_length_minus_overlap(self):
+        # (124 - 22) / 24 = 4.25 s per shot — the mockup's 0:20.50 for shot 3.
+        self.assertAlmostEqual(song_shot_start(12.0, 3, self.SHOT, 22), 20.5)
+        self.assertAlmostEqual(song_shot_start(12.0, 4, self.SHOT, 22), 24.75)
+
+    def test_no_overlap_means_back_to_back_shots(self):
+        self.assertAlmostEqual(song_shot_start(0.0, 2, self.SHOT, 0), self.SHOT)
+
+    def test_count_is_every_shot_that_starts_inside_the_song(self):
+        # starts 12.0, 16.25, … ; the last one starting before 178.4 is shot 40
+        self.assertEqual(song_shot_count(178.4, 12.0, self.SHOT, 22), 40)
+        self.assertLess(song_shot_start(12.0, 40, self.SHOT, 22), 178.4)
+        self.assertGreaterEqual(song_shot_start(12.0, 41, self.SHOT, 22), 178.4)
+
+    def test_count_is_zero_when_the_song_starts_past_its_end(self):
+        self.assertEqual(song_shot_count(30.0, 31.0, self.SHOT, 22), 0)
+
+    def test_overlap_as_long_as_the_shot_is_refused(self):
+        with self.assertRaises(ValueError):
+            song_shot_start(0.0, 2, 22 / 24, 22)
 
 
 if __name__ == "__main__":
