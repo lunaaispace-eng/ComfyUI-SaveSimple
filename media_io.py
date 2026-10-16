@@ -209,6 +209,62 @@ def _decode_audio(path: str):
         return torchaudio.load(path)
 
 
+# --- the song window -----------------------------------------------------------
+# A reference sound is cut and never padded (load_audio below). A SONG that drives
+# a shot is different: its window must be exactly as long as the shot, so a window
+# that runs off the end is filled the way the user chose — silence or the file
+# again from its start — and the node says it happened. The window idea and the
+# silence/loop choice follow ComfyUI-Pixaroma's Load Audio (MIT, (c) 2026 pixaroma,
+# nodes/_audio_window_helpers.py); this implementation is the pack's own.
+
+def plan_window(total: int, sample_rate: int, start_s: float, want_s: float) -> dict:
+    """Samples to skip, want, take from the file and fill. want_s <= 0 = to the end."""
+    sr = int(sample_rate or 1)
+    start = max(0, min(int(total), int(round(max(0.0, float(start_s or 0.0)) * sr))))
+    want = int(round(float(want_s) * sr)) if want_s and want_s > 0 else int(total) - start
+    take = max(0, min(want, int(total) - start))
+    return {"start": start, "want": want, "take": take, "fill": want - take}
+
+
+def apply_window(waveform: torch.Tensor, plan: dict, when_short: str = "silence") -> torch.Tensor:
+    """[C, L] -> [C, plan['want']]. The tail is zeros, or the file repeated from 0."""
+    start, take, fill = plan["start"], plan["take"], plan["fill"]
+    parts = [waveform[:, start:start + take]]
+    if fill > 0:
+        if when_short == "loop" and waveform.shape[-1] > 0:
+            reps = -(-fill // waveform.shape[-1])          # ceil
+            parts.append(waveform.repeat(1, reps)[:, :fill])
+        else:
+            parts.append(waveform.new_zeros(waveform.shape[0], fill))
+    return torch.cat(parts, dim=-1)
+
+
+def load_audio_window(path: str, start_s: float, seconds: float, when_short: str = "silence"):
+    """One sound file -> ({"waveform": [1, C, L], "sample_rate": sr}, info), exactly `seconds` long."""
+    waveform, sample_rate = _decode_audio(path)
+    if waveform.ndim == 1:
+        waveform = waveform.unsqueeze(0)
+    sr = int(sample_rate or 1)
+    plan = plan_window(int(waveform.shape[-1]), sr, start_s, seconds)
+    if plan["take"] <= 0:
+        raise RuntimeError(
+            f"[Luna Asset Loader] The window on {os.path.basename(path)} contains no audio: "
+            f"it starts at {plan['start'] / sr:.2f}s but the file is only "
+            f"{waveform.shape[-1] / sr:.2f}s long. Drag the window back into the song."
+        )
+    clip = apply_window(waveform, plan, when_short)
+    return {"waveform": clip.unsqueeze(0), "sample_rate": sr}, {
+        "name": os.path.basename(path),
+        "start": plan["start"] / sr,
+        "seconds": plan["want"] / sr,
+        "taken": plan["take"] / sr,
+        "filled": plan["fill"] / sr,
+        "mode": "loop" if when_short == "loop" else "silence",
+        "sample_rate": sr,
+        "channels": int(clip.shape[0]),
+    }
+
+
 def load_audio(path: str, start_s: float = 0.0, seconds: float = 0.0):
     """One audio file -> ({"waveform": [1, C, L], "sample_rate": sr}, info dict).
 
