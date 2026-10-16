@@ -60,6 +60,26 @@ def check_placements(shot: int, items: list) -> list:
     return errors
 
 
+VIDEO_EXTS = (".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v")
+
+
+def newest_video(files: list):
+    """[(name, mtime), ...] -> the most recently written video's name, or None.
+    How the continuation finds the shot that was just saved."""
+    vids = [(name, mtime) for name, mtime in files if str(name).lower().endswith(VIDEO_EXTS)]
+    return max(vids, key=lambda f: f[1])[0] if vids else None
+
+
+def tail_start(duration_s: float, fps: float, frames: int, source_fps: float | None = None) -> float:
+    """Where to start so `frames` frames at `fps` END on the clip's very last frame.
+
+    The last source frame sits one source frame before the end, and the last of
+    the output frames is (frames - 1) output frames after the start. Ending
+    anywhere else would cut away from an image the previous shot never ended on."""
+    last = float(duration_s) - 1.0 / float(source_fps or fps)
+    return max(0.0, last - (int(frames) - 1) / float(fps))
+
+
 def shot_frames(seconds, stored: int) -> int:
     """The shot length in frames: the wired `seconds` when there is one, else the
     length stored on the node."""

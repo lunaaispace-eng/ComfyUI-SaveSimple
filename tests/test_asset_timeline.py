@@ -9,7 +9,7 @@ import sys
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from asset_timeline import check_placements, h3_tags, shot_frames  # noqa: E402
+from asset_timeline import check_placements, h3_tags, newest_video, shot_frames, tail_start  # noqa: E402
 
 
 class TagTests(unittest.TestCase):
@@ -51,6 +51,28 @@ class ShotLengthTests(unittest.TestCase):
     def test_unwired_uses_the_stored_length(self):
         self.assertEqual(shot_frames(None, 192), 192)
         self.assertEqual(shot_frames(0, 192), 192)
+
+
+class ContinuationTests(unittest.TestCase):
+    def test_newest_video_wins_and_other_files_are_ignored(self):
+        files = [("shot_001.mp4", 100.0), ("shot_002.mp4", 300.0), ("shot_002.txt", 900.0), ("still.png", 800.0)]
+        self.assertEqual(newest_video(files), "shot_002.mp4")
+
+    def test_no_video_gives_none(self):
+        self.assertIsNone(newest_video([("notes.txt", 1.0)]))
+
+    def test_tail_starts_n_frames_before_the_end(self):
+        # 124 frames at 24 fps = 5.1667 s; the last 22 start at frame 102 = 4.25 s
+        self.assertAlmostEqual(tail_start(124 / 24, 24, 22), 102 / 24)
+
+    def test_tail_ends_on_the_last_source_frame(self):
+        # 12.4 s at 30 fps: the last frame is at 12.3667 s; 22 frames at 24 fps must
+        # put their last sample exactly there, so the cut joins the very last image.
+        start = tail_start(12.4, 24, 22, 30)
+        self.assertAlmostEqual(start + 21 / 24, 12.4 - 1 / 30)
+
+    def test_tail_of_a_short_clip_starts_at_zero(self):
+        self.assertEqual(tail_start(0.5, 24, 22), 0.0)
 
 
 if __name__ == "__main__":

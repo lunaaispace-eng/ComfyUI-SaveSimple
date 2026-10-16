@@ -340,6 +340,20 @@ sits where on the shot.
 with its frames, picture or sound attached, for a node that applies it. A
 placement that does not fit stops the run and says where it would fit.
 
+## Continuation — the previous shot opens this one
+
+Press **↺ Continue** and a ↺ card opens the shot with the end of the previous
+shot, so the motion carries on across the cut:
+
+| Setting | What it does |
+| --- | --- |
+| **Take** | the last frames (a clip guide from frame 0) or only the last frame (a keyframe at 0) |
+| **Frames** | when the song is cut **By shot number**, the song's overlap — sound and picture then overlap by the same amount at every cut; otherwise 5, 22 or 39 |
+| **From** | the **newest video in an output folder** (point the save node there; empty = the output folder itself), **a file** in the input folder, or the **`previous_frames`** input |
+
+The frames end exactly on the previous shot's last image. Shot 1 has nothing
+before it, so its continuation is skipped and the brief says so.
+
 ## Per-image resize
 
 `mode` defaults to `off` — nothing is touched unless asked, which is what H3's

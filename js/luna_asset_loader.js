@@ -341,6 +341,17 @@ function h3Tags(node) {
     return out;
 }
 
+// How many frames the continuation takes: the song's overlap when the song is
+// cut by shot number (sound and picture then overlap by the same amount), else
+// its own count. Shot 1 has nothing before it.
+function contFrames(m) {
+    const c = m.continuation || {}, song = m.audio[0];
+    const byShot = song?.position === "shot";
+    if (byShot && (Number(song.shot) || 1) === 1) return { frames: 0, shot1: true, fromSong: true };
+    if (c.take === "last") return { frames: 1, shot1: false, fromSong: false };
+    return { frames: byShot ? Number(song.overlap ?? 22) : Number(c.frames) || 22, shot1: false, fromSong: byShot };
+}
+
 // H3 clip lengths are 17k+5 frames; step to the previous / next one.
 function stepH3Frames(n, dir) {
     let f = Math.max(5, Math.round(n));
@@ -376,9 +387,11 @@ function readMedia(node) {
             video: Array.isArray(m.video) ? m.video.filter((c) => c && c.file) : [],
             pictures: Array.isArray(m.pictures) ? m.pictures.map((p) => p || {}) : [],
             shot: m.shot && Number(m.shot.frames) > 0 ? { frames: Number(m.shot.frames) } : null,
+            continuation: m.continuation && typeof m.continuation === "object" ? m.continuation : null,
         };
-    } catch { return { audio: [], video: [], pictures: [], shot: null }; }
+    } catch { return { audio: [], video: [], pictures: [], shot: null, continuation: null }; }
 }
+const NEW_CONT = { on: true, from: "folder", folder: "", file: "", take: "frames", frames: 22 };
 
 function writeMedia(node, m) {
     const w = widget(node, MEDIA_WIDGET);
@@ -389,6 +402,7 @@ function writeMedia(node, m) {
     // Picture roles only matter once one of them is not a plain reference.
     if (m.pictures?.some((p) => p?.role === "key")) out.pictures = m.pictures;
     if (m.shot?.frames) out.shot = m.shot;
+    if (m.continuation) out.continuation = m.continuation;   // kept while off, so settings survive a toggle
     w.value = Object.keys(out).length ? JSON.stringify(out) : "";
     w.callback?.(w.value);
     node.graph?.setDirtyCanvas(true, true);
@@ -837,15 +851,22 @@ function buildUI(node) {
     tl.className = "luna-al-tl";
     tl.style.display = "none";
     for (const ev of ["pointerdown", "keydown", "wheel"]) tl.addEventListener(ev, (e) => e.stopPropagation());
-    root.append(bar, cards, tl, preview, panel, aed, ved);
+    // The continuation editor.
+    const ced = document.createElement("div");
+    ced.className = "luna-al-ved";
+    ced.style.display = "none";
+    for (const ev of ["pointerdown", "keydown", "wheel"]) ced.addEventListener(ev, (e) => e.stopPropagation());
+    root.append(bar, cards, tl, preview, panel, aed, ved, ced);
 
     let selected = 0;                 // which card the resize panel edits
     let selAudio = -1;                // which sound card the song editor edits; -1 = none
     let selVideo = -1;                // which video card the clip editor edits; -1 = none
+    let selCont = false;              // the continuation editor is open
     // One editor at a time: picking a card of one kind clears the others.
     const pick = (kind, i) => {
         selAudio = kind === "a" ? i : -1;
         selVideo = kind === "v" ? i : -1;
+        selCont = kind === "c";
         if (kind === "p") selected = i;
         render();
     };
@@ -909,6 +930,16 @@ function buildUI(node) {
         }
         node.setDirtyCanvas(true, true);
     };
+    // The continuation: the end of the previous shot opens this one.
+    const contBtn = mkBtn("↺ Continue", "", () => {
+        const m = readMedia(node);
+        const on = !(m.continuation?.on);
+        m.continuation = { ...NEW_CONT, ...(m.continuation || {}), on };
+        writeMedia(node, m);
+        if (on) { selCont = true; selAudio = -1; selVideo = -1; } else selCont = false;
+        render();
+    });
+    contBtn.title = "Open this shot with the end of the previous one, so the motion carries on across the cut";
     const fieldsBtn = mkBtn("Fields", "", () => {
         fieldsShown = !fieldsShown;
         setFieldsVisible(fieldsShown);
@@ -1002,7 +1033,7 @@ function buildUI(node) {
 
         paths.forEach((name, i) => {
             const card = document.createElement("div");
-            card.className = "luna-al-card" + (i === selected && selAudio < 0 && selVideo < 0 ? " sel" : "");
+            card.className = "luna-al-card" + (i === selected && selAudio < 0 && selVideo < 0 && !selCont ? " sel" : "");
             card.draggable = true;
             // Selecting is what makes a nine-image node editable: the resize panel
             // below edits whichever card is selected, so REF2VA references can stay
@@ -1086,6 +1117,30 @@ function buildUI(node) {
             card.append(img, pic, x, cap);
             cards.appendChild(card);
         });
+
+        // The continuation card comes first: it opens the shot.
+        if (media.continuation?.on) {
+            const card = document.createElement("div");
+            card.className = "luna-al-card" + (selCont ? " sel" : "");
+            card.style.cursor = "pointer";
+            card.title = "Continuation — the end of the previous shot opens this one";
+            card.onclick = () => pick("c", 0);
+            const face = document.createElement("div");
+            face.className = "luna-al-vthumb";
+            face.style.cssText = "display:flex;align-items:center;justify-content:center;font-size:30px;color:#fff9;background:repeating-linear-gradient(45deg,#3a2a40 0 8px,#2c2131 8px 16px)";
+            face.textContent = "↺";
+            const pic = document.createElement("div");
+            pic.className = "luna-al-pic vid";
+            pic.textContent = "↺";
+            const cap = document.createElement("div");
+            cap.className = "luna-al-cap";
+            const c = media.continuation;
+            const n = contFrames(media);
+            cap.innerHTML = `<div class="luna-al-dim">${n.shot1 ? "shot 1: none" : c.take === "last" ? "last frame" : `last ${n.frames} frames`}</div><div class="luna-al-name"></div>`;
+            cap.querySelector(".luna-al-name").textContent = c.from === "input" ? "previous_frames input" : c.from === "file" ? (c.file || "pick a file") : `newest in output/${c.folder || ""}`;
+            card.append(face, pic, cap);
+            cards.appendChild(card);
+        }
 
         // Video cards after the pictures: V1-V3, MiniMax H3's <Video k> in this order.
         media.video.forEach((c, i) => {
@@ -1177,6 +1232,7 @@ function buildUI(node) {
         renderPanel();
         renderAudio();
         renderVideo();
+        renderContinuation();
 
         // The widget's getHeight depends on how many cards there are, so a redraw
         // has to follow any change to the list or the node keeps its old height.
@@ -1185,7 +1241,7 @@ function buildUI(node) {
 
     function renderPreview() {
         const paths = readPaths(node);
-        if (selAudio >= 0 || selVideo >= 0) { preview.style.display = "none"; return; }
+        if (selAudio >= 0 || selVideo >= 0 || selCont) { preview.style.display = "none"; return; }
         if (!paths.length) {
             // Drop the picture as well as hiding the box: leaving the src set kept
             // the removed image decoded, and the dataset guard below would then
@@ -1217,8 +1273,8 @@ function buildUI(node) {
 
     function renderPanel() {
         panel.replaceChildren();
-        panel.style.display = selAudio >= 0 || selVideo >= 0 ? "none" : "";
-        if (selAudio >= 0 || selVideo >= 0) return;
+        panel.style.display = selAudio >= 0 || selVideo >= 0 || selCont ? "none" : "";
+        if (selAudio >= 0 || selVideo >= 0 || selCont) return;
         const paths = readPaths(node);
         if (!paths.length) return;
         if (selected >= paths.length) selected = 0;
@@ -1454,6 +1510,17 @@ function buildUI(node) {
         };
 
         const tp = q('[data-k="p"]'), tv = q('[data-k="v"]'), ta = q('[data-k="a"]'), refs = q(".luna-al-refs");
+        // The continuation always opens the shot: drawn, not draggable.
+        const cf = m.continuation?.on ? contFrames(m) : null;
+        if (cf && !cf.shot1) {
+            const el = document.createElement("div");
+            el.className = "luna-al-blk vid" + (selCont ? " sel" : "");
+            el.style.cssText = `left:0;width:${Math.max(0.8, cf.frames / S * 100)}%;background:repeating-linear-gradient(45deg,#b07a8a 0 6px,#9a6878 6px 12px);cursor:pointer`;
+            el.textContent = `↺ 0–${cf.frames - 1}`;
+            el.title = "The continuation: the end of the previous shot";
+            el.onclick = () => pick("c", 0);
+            tv.appendChild(el);
+        }
         const chip = (cls, text, kind, i, title) => {
             const c = document.createElement("span");
             c.className = `luna-al-chip ${cls}`;
@@ -1825,6 +1892,77 @@ function buildUI(node) {
         };
     }
 
+    /* ------------------------------------------------- continuation editor */
+
+    function renderContinuation() {
+        const m = readMedia(node);
+        if (!selCont || !m.continuation?.on) {
+            selCont = selCont && !!m.continuation?.on;
+            ced.style.display = "none";
+            ced.replaceChildren();
+            return;
+        }
+        ced.style.display = "";
+        const c = { ...NEW_CONT, ...m.continuation }, n = contFrames(m);
+        ced.innerHTML = `
+            <div class="luna-al-ahead"><b>↺ Continuation</b><span>the end of the previous shot opens this one</span><span class="sp"></span>
+              <div class="luna-al-play off" title="Turn the continuation off">Off</div></div>
+            <div class="luna-al-strip cstrip" style="height:40px"></div>
+            <div class="luna-al-zlbl"><span class="cwhat">…</span><span class="cfr"></span></div>
+            <div class="luna-al-row"><div class="luna-al-lbl">Take</div><div class="luna-al-seg take"></div></div>
+            <div class="luna-al-row frow"><div class="luna-al-lbl">Frames</div><div class="luna-al-seg frs"></div></div>
+            <div class="luna-al-row"><div class="luna-al-lbl">From</div><div class="luna-al-seg from"></div></div>
+            <div class="luna-al-row frow2"><div class="luna-al-lbl src"></div><div class="luna-al-nf"><input class="cin" style="width:220px"></div></div>
+            <div class="luna-al-astat"></div>`;
+        const $ = (s) => ced.querySelector(s);
+        const set = (patch) => { const mm = readMedia(node); mm.continuation = { ...c, ...patch }; writeMedia(node, mm); render(); };
+        const seg = (host, opts, cur, f) => {
+            host.replaceChildren();
+            for (const [val, text] of opts) {
+                const o = document.createElement("div");
+                o.className = "luna-al-opt" + (String(val) === String(cur) ? " on" : "");
+                o.textContent = text;
+                o.onclick = () => f(val);
+                host.appendChild(o);
+            }
+        };
+        $(".off").onclick = () => set({ on: false });
+        seg($(".take"), [["frames", "Last frames (a clip)"], ["last", "Last frame (a picture)"]], c.take, (v) => set({ take: v }));
+        if (n.fromSong || c.take === "last") {
+            $(".frs").innerHTML = `<span class="luna-al-lock">${c.take === "last" ? "1 frame" : `= the song's overlap, ${Number(m.audio[0]?.overlap ?? 22)} frames`}</span>`;
+        } else seg($(".frs"), [[5, "5"], [22, "22"], [39, "39"]], c.frames, (v) => set({ frames: v }));
+        seg($(".from"), [["folder", "Newest in an output folder"], ["file", "A file"], ["input", "previous_frames input"]], c.from, (v) => set({ from: v }));
+        const inp = $(".cin");
+        if (c.from === "input") $(".frow2").style.display = "none";
+        $(".src").textContent = c.from === "folder" ? "Folder" : "File";
+        inp.placeholder = c.from === "folder" ? "e.g. music_video  (empty = the output folder)" : "a video in the input folder";
+        inp.value = c.from === "folder" ? c.folder : c.file;
+        inp.onchange = () => set(c.from === "folder" ? { folder: inp.value.trim() } : { file: inp.value.trim() });
+        inp.addEventListener("keydown", (e) => { if (e.key === "Enter") inp.blur(); });
+
+        const describe = (name) => {
+            const k = n.frames;
+            $(".cwhat").textContent = name ? `from ${name}` : "no video found yet";
+            $(".cfr").textContent = n.shot1 ? "" : k === 1 ? "frame 0" : `frames 0–${k - 1} of this shot`;
+            let msg = n.shot1
+                ? "This is <b>shot 1</b>: nothing comes before it, so the continuation is skipped."
+                : `Frames <b>0–${k - 1}</b> of this shot are guided by the last ${k === 1 ? "frame" : `${k} frames`} of the previous shot, so the motion carries on across the cut.`;
+            if (n.fromSong && !n.shot1) msg += ` The song windows overlap by the same ${(k / H3_FPS).toFixed(2)} s, so sound and picture line up.`;
+            if (c.from === "folder") msg += `<br>Takes whatever video was written last into <b>output/${(c.folder || "").replace(/[<>&]/g, "")}</b> — point your save node there.`;
+            if (c.from === "input") msg += `<br>Wire the previous shot's frames into <b>previous_frames</b>.`;
+            $(".luna-al-astat").innerHTML = msg;
+            if (name && c.from !== "input") $(".cstrip").style.backgroundImage = "";
+        };
+        if (c.from === "folder") {
+            fetch(`/lunasave/newest-video?folder=${encodeURIComponent(c.folder || "")}`)
+                .then((r) => r.json()).then((j) => describe(j.name ? `${j.name}${j.duration ? ` (${j.duration.toFixed(2)} s)` : ""}` : null))
+                .catch(() => describe(null));
+        } else if (c.from === "file" && c.file) {
+            $(".cstrip").style.backgroundImage = `url("${stripURL(c.file, 12)}")`;
+            describe(c.file);
+        } else describe(c.from === "input" ? "the previous_frames input" : null);
+    }
+
     /* --------------------------------------------------------- clip editor */
 
     function renderVideo() {
@@ -2042,7 +2180,8 @@ function buildUI(node) {
 
     return { root, render, selectCard: (i) => { selected = i; renderPanel(); }, natural,
              audioOpen: () => selAudio >= 0, audioExtraRows,
-             videoOpen: () => selVideo >= 0, videoHeight, timelineHeight };
+             videoOpen: () => selVideo >= 0, videoHeight, timelineHeight,
+             contOpen: () => selCont && !!readMedia(node).continuation?.on };
 }
 
 /* ---------------------------------------------------------------- register */
@@ -2073,10 +2212,14 @@ app.registerExtension({
             const AUDIO_H = 360;
             const cardsHeight = () => {
                 const list = readPaths(this);
-                const md = readMedia(this), sounds = md.audio.length + md.video.length;
+                const md = readMedia(this), sounds = md.audio.length + md.video.length + (md.continuation?.on ? 1 : 0);
                 const cols = Math.max(1, Math.floor((this.size[0] - 24) / CELL));
                 const rows = Math.max(1, Math.ceil((list.length + sounds) / cols));
                 const tlh = ui.timelineHeight();
+                if (ui.contOpen()) {
+                    const h = 250 + tlh;   // head, strip, label, four rows, status — added up, never measured
+                    return Math.min(MAXH + h, BAR + PAD + rows * CELL + h);
+                }
                 if (ui.videoOpen()) {
                     const h = ui.videoHeight() + tlh;
                     return Math.min(MAXH + h, BAR + PAD + rows * CELL + h);

@@ -64,7 +64,7 @@ from PIL import Image, ImageOps
 import folder_paths
 import node_helpers
 
-from .asset_timeline import check_placements, h3_tags, shot_frames
+from .asset_timeline import check_placements, h3_tags, newest_video, shot_frames, tail_start
 from .media_io import (FPS, clip_bytes, clip_soundtrack, decode_clip, filmstrip_jpeg, grid_frames,
                        load_audio, load_audio_window, probe_media, song_shot_count, song_shot_start)
 
@@ -207,8 +207,18 @@ def _parse_media(raw: str) -> dict:
         p = p if isinstance(p, dict) else {}
         pics.append({"role": "key" if p.get("role") == "key" else "ref", "at": max(0, int(p.get("at") or 0))})
     shot = data.get("shot") if isinstance(data.get("shot"), dict) else {}
+    # The continuation: the end of the previous shot, anchored at frame 0 of this one.
+    c = data.get("continuation") if isinstance(data.get("continuation"), dict) else {}
+    cont = {
+        "on": bool(c.get("on")),
+        "from": c.get("from") if c.get("from") in ("folder", "file", "input") else "folder",
+        "folder": str(c.get("folder") or ""),
+        "file": str(c.get("file") or ""),
+        "take": "last" if c.get("take") == "last" else "frames",
+        "frames": max(1, int(c.get("frames") or 22)),
+    }
     return {"audio": cards, "video": clips, "pictures": pics,
-            "shot_frames": max(1, int(shot.get("frames") or 124))}
+            "shot_frames": max(1, int(shot.get("frames") or 124)), "continuation": cont}
 
 
 def _clock(t: float) -> str:
@@ -413,6 +423,9 @@ class LunaAssetLoader:
                     "forceInput": True,
                     "tooltip": "The generation height. See width.",
                 }),
+                "previous_frames": ("IMAGE", {
+                    "tooltip": "The previous shot's frames, for a continuation whose source is 'Input': its last frames open this shot, so the motion carries on across the cut.",
+                }),
             },
         }
 
@@ -439,6 +452,16 @@ class LunaAssetLoader:
             if resolved and os.path.isfile(resolved):
                 s = os.stat(resolved)
                 m.update(f"{c['file']}|{s.st_size}|{s.st_mtime_ns}".encode("utf-8"))
+        # A continuation from an output folder must re-run when a newer shot lands there.
+        try:
+            cont = _parse_media(media_state)["continuation"]
+            if cont["on"] and cont["from"] == "folder":
+                newest = _output_newest(cont["folder"])
+                if newest:
+                    s = os.stat(newest)
+                    m.update(f"{newest}|{s.st_size}|{s.st_mtime_ns}".encode("utf-8"))
+        except (RuntimeError, OSError):
+            pass
         return m.hexdigest()
 
     @classmethod
@@ -450,7 +473,7 @@ class LunaAssetLoader:
         return True
 
     def load(self, image_paths, image_count, asset_state="", media_state="", seconds=None, shot=None,
-             width=None, height=None):
+             width=None, height=None, previous_frames=None):
         paths = _split_paths(image_paths)
         media = _parse_media(media_state)
         cards, clips = media["audio"], media["video"]
@@ -464,6 +487,7 @@ class LunaAssetLoader:
         audio, song, song_line = self._song(cards, seconds, shot)
         decoded = self._clips(clips, width, height)
         extra_sounds = self._sounds(cards)
+        carry, carry_line = self._continuation(media["continuation"], cards, song, width, height, previous_frames)
         frames, dims, originals = [], [], []
         if paths:
             states = _parse_state(asset_state, len(paths))
@@ -483,6 +507,8 @@ class LunaAssetLoader:
                    for k, (c, d) in enumerate(zip(clips, decoded)) if c["role"] == "guide"]
         placed += [(f"Sound A{j + 1} ({c['file']})", c["at"], 1)
                    for j, c in enumerate(cards) if c["role"] in ("guide", "lock")]
+        if carry is not None:
+            placed.append(("The continuation", 0, int(carry["frames" if carry["kind"] == "video" else "image"].shape[0])))
         errors = check_placements(shot_len, placed)
         if errors:
             raise RuntimeError("[Luna Asset Loader] " + " ".join(errors) + " Drag it on the shot timeline.")
@@ -544,6 +570,8 @@ class LunaAssetLoader:
             parts.append("WARNING: MiniMax H3 does not accept reference sounds without a reference "
                          "picture or clip.")
         on_shot = self._shot_lines(pic, clips, decoded, cards, song)
+        if carry_line:
+            on_shot.insert(0, carry_line)
         if on_shot:
             parts.append(f"On the shot ({shot_len} frames, {shot_len / FPS:.2f} s): " + "; ".join(on_shot) + ".")
         if song_line:
@@ -553,6 +581,8 @@ class LunaAssetLoader:
         print(f"[Luna Asset Loader] {brief}")
 
         timeline = self._timeline(shot_len, pic, frames, clips, decoded, cards, extra_sounds, audio, song)
+        if carry is not None:
+            timeline["items"].insert(0, carry)
         numbered: list = [frames[i] if i < len(frames) else None for i in range(MAX_IMAGES)]
         w, h = dims[0] if dims else (0, 0)
         result = (_conform(frames) if frames else None, w, h, brief, audio, refs, timeline) + tuple(numbered)
@@ -648,6 +678,51 @@ class LunaAssetLoader:
         return audio, info, line
 
     @staticmethod
+    def _continuation(cont, cards, song, width, height, previous_frames):
+        """The end of the previous shot -> (timeline item at frame 0, brief line), or (None, "").
+
+        As many frames as the song's overlap when the song is cut by shot number, so
+        sound and picture overlap by the same amount at every cut; otherwise the
+        count stored on the continuation. Shot 1 has nothing before it."""
+        if not cont["on"]:
+            return None, ""
+        if song and song.get("shot") == 1:
+            return None, "shot 1: no continuation (nothing comes before it)"
+        n = 1 if cont["take"] == "last" else (song["overlap"] if song and song.get("shot") else cont["frames"])
+        n = max(1, int(n))
+        if cont["from"] == "input":
+            if previous_frames is None:
+                raise RuntimeError("[Luna Asset Loader] The continuation's source is 'Input', but "
+                                   "previous_frames is not wired.")
+            tail = previous_frames[-n:]
+            if n > 1 and tail.shape[0] < n:
+                raise RuntimeError(f"[Luna Asset Loader] previous_frames has {tail.shape[0]} frame(s); "
+                                   f"the continuation needs {n}.")
+            name, src = "previous_frames", "the previous_frames input"
+        else:
+            path = _output_newest(cont["folder"]) if cont["from"] == "folder" else _input_file(cont["file"])
+            if not path:
+                where = (f"the output folder '{cont['folder'] or '(output)'}'" if cont["from"] == "folder"
+                         else f"the input folder ('{cont['file']}')")
+                raise RuntimeError(f"[Luna Asset Loader] The continuation found no video in {where}.")
+            info = probe_media(path)
+            box = (int(width), int(height)) if width and height and int(width) > 0 and int(height) > 0 else None
+            size = ("box", box[0], box[1]) if box else ("edge", 768)
+            fps = FPS if n > 1 else (info.get("fps") or FPS)
+            tail, got = decode_clip(path, tail_start(info.get("duration", 0.0), fps, n, info.get("fps")), n, fps,
+                                    size, "crop", 1, "fp32", "h3" if n > 1 else "free")
+            if n > 1 and got["frames"] < n:
+                raise RuntimeError(f"[Luna Asset Loader] {got['name']} gave {got['frames']} frame(s) for the "
+                                   f"continuation; it needs {n}.")
+            tail = tail[-n:]
+            name, src = got["name"], got["name"]
+        if n == 1:
+            return ({"kind": "picture", "card": "continuation", "at": 0, "file": name, "image": tail[-1:]},
+                    f"frame 0: the last frame of {src} (continuation)")
+        return ({"kind": "video", "card": "continuation", "at": 0, "file": name, "frames": tail, "audio": None},
+                f"frames 0-{n - 1}: the last {n} frames of {src} (continuation — the motion carries on)")
+
+    @staticmethod
     def _sounds(cards):
         """Sound cards 2-3 that are references or guides -> {index: (AUDIO, description)}.
         Cut to their window, never filled: a reference ends where it ends."""
@@ -725,6 +800,22 @@ def _input_file(name: str):
     return path
 
 
+def _output_newest(folder: str):
+    """The newest video in a folder under ComfyUI's output folder ('' = the output
+    folder itself), or None. The folder name is screened like _input_file's."""
+    root = os.path.realpath(folder_paths.get_output_directory())
+    folder = (folder or "").strip().strip("/\\")
+    if folder and (os.path.isabs(folder) or ":" in folder or ".." in folder.replace("\\", "/").split("/")):
+        return None
+    base = os.path.realpath(os.path.join(root, folder))
+    if os.path.commonpath([root, base]) != root or not os.path.isdir(base):
+        return None
+    files = [(n, os.path.getmtime(os.path.join(base, n))) for n in os.listdir(base)
+             if os.path.isfile(os.path.join(base, n))]
+    name = newest_video(files)
+    return os.path.join(base, name) if name else None
+
+
 try:
     from aiohttp import web
     from server import PromptServer
@@ -742,6 +833,19 @@ if PromptServer is not None:
             return web.json_response(probe_media(path))
         except Exception as e:
             return web.json_response({"error": f"cannot read: {type(e).__name__}"}, status=415)
+
+    @PromptServer.instance.routes.get("/lunasave/newest-video")
+    async def _luna_newest(request):
+        """Which video the continuation would take from an output folder, right now."""
+        path = _output_newest(request.query.get("folder", ""))
+        if not path:
+            return web.json_response({"name": None})
+        info = {"name": os.path.basename(path), "mtime": os.path.getmtime(path)}
+        try:
+            info.update({k: v for k, v in probe_media(path).items() if k in ("duration", "fps", "width", "height")})
+        except Exception:
+            pass
+        return web.json_response(info)
 
     @PromptServer.instance.routes.get("/lunasave/filmstrip")
     async def _luna_filmstrip(request):
