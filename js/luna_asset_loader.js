@@ -306,11 +306,12 @@ const NEW_VIDEO = { start: 0, frames: 124, fps: "target", count: "target", size:
 // Clip facts (size, fps, length, sound) come from the server: the browser's
 // <video> element does not expose a frame rate.
 const _mediaInfo = new Map();
+const _hasSound = new Map();   // file -> does it have a sound track (filled as info arrives)
 function mediaInfo(file) {
     if (!_mediaInfo.has(file)) {
         const p = fetch(`/lunasave/media-info?file=${encodeURIComponent(file)}`)
             .then((r) => (r.ok ? r.json() : Promise.reject(new Error(r.status))));
-        p.catch(() => _mediaInfo.delete(file));
+        p.then((mi) => _hasSound.set(file, !!mi.audio)).catch(() => _mediaInfo.delete(file));
         _mediaInfo.set(file, p);
     }
     return _mediaInfo.get(file);
@@ -322,7 +323,10 @@ const stripURL = (file, n) => `/lunasave/filmstrip?file=${encodeURIComponent(fil
 // the song locked to the shot, later sounds are references.
 const picRole = (m, i) => (m.pictures[i]?.role === "key" ? "key" : "ref");
 const clipRole = (c) => (c.role === "guide" ? "guide" : "ref");
-const soundRole = (c, j) => (["lock", "guide", "ref"].includes(c.role) ? c.role : j === 0 ? "lock" : "ref");
+// Mirror of asset_timeline.normalize_sound_role: only sound 1 (the song) can be
+// locked — a later sound asked to lock is a guide.
+const soundRole = (c, j) => (c.role === "lock" ? (j === 0 ? "lock" : "guide")
+    : ["guide", "ref"].includes(c.role) ? c.role : j === 0 ? "lock" : "ref");
 
 // Mirror of asset_timeline.h3_tags: H3 numbers ONLY the references, in order, so
 // a keyframe on card 1 makes card 2 <Picture 1>. Sound order: each reference
@@ -334,7 +338,8 @@ function h3Tags(node) {
     for (let i = 0; i < n; i++) if (picRole(m, i) === "ref") out.pictures[i] = `<Picture ${++p}>`;
     m.video.forEach((c, k) => {
         if (clipRole(c) !== "ref") return;
-        if (c.sound !== "drop") out.videoAudio[k] = `<Audio ${++a}>`;   // if the file has sound
+        // A kept soundtrack counts only when the file has sound (known once its info is in).
+        if (c.sound !== "drop" && _hasSound.get(c.file) !== false) out.videoAudio[k] = `<Audio ${++a}>`;
         out.videos[k] = `<Video ${++v}>`;
     });
     m.audio.forEach((c, j) => { if (soundRole(c, j) === "ref") out.sounds[j] = `<Audio ${++a}>`; });
@@ -344,10 +349,11 @@ function h3Tags(node) {
 // How many frames the continuation takes: the song's overlap when the song is
 // cut by shot number (sound and picture then overlap by the same amount), else
 // its own count. Shot 1 has nothing before it.
-function contFrames(m) {
+function contFrames(m, wiredShotNo = null) {
     const c = m.continuation || {}, song = m.audio[0];
     const byShot = song?.position === "shot";
-    if (byShot && (Number(song.shot) || 1) === 1) return { frames: 0, shot1: true, fromSong: true };
+    const shotNo = wiredShotNo > 0 ? wiredShotNo : (Number(song?.shot) || 1);   // a wired shot wins, as in Python
+    if (byShot && shotNo === 1) return { frames: 0, shot1: true, fromSong: true };
     if (c.take === "last") return { frames: 1, shot1: false, fromSong: false };
     return { frames: byShot ? Number(song.overlap ?? 22) : Number(c.frames) || 22, shot1: false, fromSong: byShot };
 }
@@ -359,7 +365,8 @@ function stepH3Frames(n, dir) {
     else { f -= 1; while (f > 5 && f % 17 !== 5) f -= 1; f = Math.max(5, f); }
     return f;
 }
-const nearestH3Frames = (n) => Math.round(snapH3Seconds(n / H3_FPS) * H3_FPS);
+// Capped at 362 like media_io.snap_frames_nearest: the top of the trained range.
+const nearestH3Frames = (n) => Math.min(362, Math.round(snapH3Seconds(n / H3_FPS) * H3_FPS));
 
 // The numbers on the nodes feeding `seconds` and `shot`, as one string. Checked on
 // every draw, so editing the Float/Int upstream moves the window straight away.
@@ -632,7 +639,9 @@ function migrateWorkflowJSON(data) {
             n.outputs.splice(4, 0, ...NEW_OUTS.map(([name, type]) => ({ name, localized_name: name, type, links: null })));
         }
         if (!old.size) return;
-        for (const l of g.links || []) {
+        // Floating links (a wire dragged to a reroute with nothing after it) carry an
+        // origin too; they move with the rest.
+        for (const l of [...(g.links || []), ...(g.floatingLinks || [])]) {
             // [id, origin_id, origin_slot, target_id, target_slot, type] in the root
             // graph; {id, origin_id, origin_slot, ...} inside subgraph definitions.
             const arr = Array.isArray(l);
@@ -644,7 +653,61 @@ function migrateWorkflowJSON(data) {
     };
     fixGraph(data, "root");
     for (const sg of data?.definitions?.subgraphs || []) fixGraph(sg, `subgraph ${sg.id}`);
+    // clipboard / blueprint data keeps its subgraphs at the top level
+    for (const sg of Array.isArray(data?.subgraphs) ? data.subgraphs : []) fixGraph(sg, `subgraph ${sg.id}`);
     return moved;
+}
+
+// Paste and subgraph-blueprint insertion go through LGraphCanvas._deserializeItems,
+// never loadGraphData, so beforeConfigureGraph never sees them (review,
+// 2026-10-16). Tested: an old pasted node lost its image_1/image_3 wires (AUDIO and
+// LUNA_TIMELINE slots refuse an IMAGE link) and image_4+ would land on image_1+.
+// The same JSON migration runs on that data before it becomes nodes.
+function patchDeserialize() {
+    const proto = app.canvas && Object.getPrototypeOf(app.canvas);
+    if (!proto || typeof proto._deserializeItems !== "function" || proto._lunaAssetMigrates) return;
+    const orig = proto._deserializeItems;
+    proto._deserializeItems = function (items, options) {
+        try {
+            const moved = migrateWorkflowJSON(items);
+            if (moved.length) console.info("[Luna Asset Loader] updated pasted pre-v3 Asset Loader wires:", moved);
+        } catch (e) { console.warn("[Luna Asset Loader] paste migration skipped:", e); }
+        return orig.call(this, items, options);
+    };
+    proto._lunaAssetMigrates = true;
+}
+
+// Paste and subgraph-blueprint insertion never call loadGraphData, so the JSON
+// migration above never sees them (review, 2026-10-16). Such a node is configured
+// from its old serialized form — outputs[4] still "image_1" in `info` — and its
+// links are made right after. So: once they exist, move every link leaving slot 4
+// or higher up by three, on the live graph. A node from a migrated save has
+// "audio" at slot 4 in `info` and is left alone.
+function migrateLiveNode(node) {
+    const g = node.graph;
+    if (!g || !node.outputs) return 0;
+    const getLink = (id) => g.getLink?.(id) ?? g.links?.get?.(id) ?? g.links?.[id];
+    const moves = [];
+    node.outputs.forEach((o, i) => {
+        if (i < 4) return;
+        for (const id of o.links || []) { const l = getLink(id); if (l && l.origin_id === node.id) moves.push([i, id, l]); }
+    });
+    if (!moves.length) return 0;
+    const need = Math.max(...moves.map(([i]) => i)) + NEW_OUTS.length;
+    const cw = widget(node, COUNT_WIDGET);
+    if (cw && node.outputs.length <= need) {
+        cw.value = Math.min(MAX, Math.max(Number(cw.value) || 1, need - FIXED + 1));
+        applyCount(node);
+    }
+    for (const [i] of moves) node.outputs[i].links = [];
+    for (const [i, id, l] of moves) {
+        const to = i + NEW_OUTS.length;
+        l.origin_slot = to;
+        const out = node.outputs[to];
+        if (out) (out.links = out.links || []).push(id);
+    }
+    node.setDirtyCanvas(true, true);
+    return moves.length;
 }
 
 // Returns what happened: { target, shown, blocked }. `blocked` is the 1-based
@@ -1135,7 +1198,7 @@ function buildUI(node) {
             const cap = document.createElement("div");
             cap.className = "luna-al-cap";
             const c = media.continuation;
-            const n = contFrames(media);
+            const n = contFrames(media, wiredShot().value);
             cap.innerHTML = `<div class="luna-al-dim">${n.shot1 ? "shot 1: none" : c.take === "last" ? "last frame" : `last ${n.frames} frames`}</div><div class="luna-al-name"></div>`;
             cap.querySelector(".luna-al-name").textContent = c.from === "input" ? "previous_frames input" : c.from === "file" ? (c.file || "pick a file") : `newest in output/${c.folder || ""}`;
             card.append(face, pic, cap);
@@ -1180,6 +1243,8 @@ function buildUI(node) {
             cards.appendChild(card);
             mediaInfo(c.file).then((mi) => {
                 dim.textContent = `${(mi.duration || 0).toFixed(1)} s · ${+(mi.fps || 0).toFixed(2)} fps${mi.audio ? "" : " · no sound"}`;
+                // A silent clip shifts the <Audio n> numbers: redraw the tags now that it is known.
+                if (!mi.audio && c.sound !== "drop") renderTimeline();
             }).catch(() => { dim.textContent = "cannot be read"; });
         });
 
@@ -1511,7 +1576,7 @@ function buildUI(node) {
 
         const tp = q('[data-k="p"]'), tv = q('[data-k="v"]'), ta = q('[data-k="a"]'), refs = q(".luna-al-refs");
         // The continuation always opens the shot: drawn, not draggable.
-        const cf = m.continuation?.on ? contFrames(m) : null;
+        const cf = m.continuation?.on ? contFrames(m, wiredShot().value) : null;
         if (cf && !cf.shot1) {
             const el = document.createElement("div");
             el.className = "luna-al-blk vid" + (selCont ? " sel" : "");
@@ -1647,7 +1712,8 @@ function buildUI(node) {
         const [phW, phZ] = aed.querySelectorAll(".luna-al-ph");
         const iSt = $(".st"), iDu = $(".du"), iEn = $(".en"), iSn = $(".sn");
         roleRow($(".rolehost"), "a", idx,
-                [["lock", "Lock to shot"], ["guide", "Guide at frame"], ["ref", "Reference"]],
+                idx === 0 ? [["lock", "Lock to shot"], ["guide", "Guide at frame"], ["ref", "Reference"]]
+                          : [["guide", "Guide at frame"], ["ref", "Reference"]],   // the shot has one locked sound: the song
                 soundRole(card, idx), Number(card.at) || 0, 1);
 
         const total = () => info?.duration || 0;
@@ -1903,7 +1969,7 @@ function buildUI(node) {
             return;
         }
         ced.style.display = "";
-        const c = { ...NEW_CONT, ...m.continuation }, n = contFrames(m);
+        const c = { ...NEW_CONT, ...m.continuation }, n = contFrames(m, wiredShot().value);
         ced.innerHTML = `
             <div class="luna-al-ahead"><b>↺ Continuation</b><span>the end of the previous shot opens this one</span><span class="sp"></span>
               <div class="luna-al-play off" title="Turn the continuation off">Off</div></div>
@@ -2073,6 +2139,8 @@ function buildUI(node) {
             const gb = w && h ? kept * w * h * 3 * (card.precision === "fp16" ? 2 : 4) / 1024 ** 3 : 0;
             let msg = w ? `Will decode <b>${kept} frames at ${w}×${h}</b> = <b>${gb.toFixed(2)} GB</b> as ${card.precision}.` : "";
             if (gb > MEMORY_CAP_GB) msg += ` <span class="w">That is more than the ${MEMORY_CAP_GB} GB this node allows; the run will refuse it.</span>`;
+            if (card.count === "target" && Number(card.nth) > 1)
+                msg += `<br><span class="w">Every Nth on the H3 grid makes H3 play the clip faster (it assumes 24 fps) and its sound no longer matches — the run refuses it. Keep every frame, or set Frames to Free.</span>`;
             if (card.size === "canvas" && !(ww.value > 0 && wh.value > 0))
                 msg += `<br><span class="w">Match canvas needs <b>width</b> and <b>height</b> wired; until then the clip keeps its shape at a 768 short edge.</span>`;
             if (T && start + s > T + 1e-3)
@@ -2188,6 +2256,7 @@ function buildUI(node) {
 
 app.registerExtension({
     name: "LunaSaveSimple.AssetLoader",
+    setup() { patchDeserialize(); },
     beforeConfigureGraph(graphData) {
         const moved = migrateWorkflowJSON(graphData);
         if (moved.length) console.info("[Luna Asset Loader] updated a workflow saved before the audio/refs/timeline outputs:", moved);
@@ -2297,8 +2366,14 @@ app.registerExtension({
         };
 
         const onConfigure = nodeType.prototype.onConfigure;
-        nodeType.prototype.onConfigure = function () {
+        nodeType.prototype.onConfigure = function (info) {
             const r = onConfigure?.apply(this, arguments);
+            if (info?.outputs?.[4]?.name === "image_1") {
+                setTimeout(() => {
+                    const n = migrateLiveNode(this);
+                    if (n) console.info(`[Luna Asset Loader] moved ${n} wire(s) of a pasted pre-v3 node up by three slots.`);
+                }, 0);
+            }
             requestAnimationFrame(() => { applyCount(this); this._lunaRender?.(); });
             return r;
         };

@@ -60,6 +60,26 @@ def check_placements(shot: int, items: list) -> list:
     return errors
 
 
+def normalize_sound_role(role, index: int) -> str:
+    """Only sound 1 (the song) can be locked to the shot — the shot has one sound
+    track. A later sound asked to lock becomes a guide; missing roles default to
+    lock for the song and reference for the rest."""
+    if role == "lock":
+        return "lock" if index == 0 else "guide"
+    if role in ("guide", "ref"):
+        return role
+    return "lock" if index == 0 else "ref"
+
+
+def thinning_error(count: str, nth: int) -> str:
+    """Every Nth frame on the MiniMax H3 grid would hand H3 a clip it plays at the
+    wrong speed (it assumes 24 fps) with a soundtrack of the original length."""
+    if count == "target" and int(nth) > 1:
+        return ("Every Nth frame makes MiniMax H3 play the clip faster (it assumes 24 fps), and its "
+                "sound no longer matches. Keep every frame, or set Frames to Free.")
+    return ""
+
+
 VIDEO_EXTS = (".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v")
 
 

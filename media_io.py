@@ -134,6 +134,59 @@ def pick_frames(src_times: list, out_fps: float, start_s: float, count: int) -> 
     return out
 
 
+class FramePicker:
+    """pick_frames, one source frame at a time, so the decoder keeps only the
+    frames it will deliver. feed(t, id) returns the ids picked so far (every
+    nth output frame); finish() resolves what is left once the source ends."""
+
+    def __init__(self, out_fps: float, start_s: float, count: int, nth: int = 1):
+        self.fps, self.start, self.count, self.nth = float(out_fps), float(start_s), int(count), max(1, int(nth))
+        self.k, self.prev, self.prev_t, self.gaps = 0, None, None, []
+
+    @property
+    def done(self) -> bool:
+        return self.k >= self.count
+
+    def _target(self) -> float:
+        return self.start + self.k / self.fps
+
+    def _emit(self, ident, out: list):
+        if self.k % self.nth == 0:
+            out.append(ident)
+        self.k += 1
+
+    def feed(self, t: float, ident) -> list:
+        out = []
+        # every target strictly before this frame is held by the previous frame
+        while not self.done and self._target() + 1e-9 < t:
+            self._emit(self.prev if self.prev is not None else ident, out)
+        if self.prev_t is not None and t > self.prev_t:
+            self.gaps.append(t - self.prev_t)
+        self.prev, self.prev_t = ident, t
+        return out
+
+    def finish(self) -> list:
+        out = []
+        if self.prev is None:
+            return out
+        gaps = sorted(self.gaps)
+        dt = gaps[len(gaps) // 2] if gaps else 1.0 / self.fps
+        end = self.prev_t + dt
+        while not self.done and self._target() < end - 1e-9:
+            self._emit(self.prev, out)
+        return out
+
+
+def strip_annotation(name: str) -> tuple:
+    """'song.mp3 [input]' -> ('song.mp3', 'input'). Only a trailing ComfyUI folder
+    tag is removed, so a real name like 'clip [v2].mp4' survives intact."""
+    for tag in ("input", "output", "temp"):
+        suffix = f" [{tag}]"
+        if name.endswith(suffix):
+            return name[: -len(suffix)], tag
+    return name, None
+
+
 def fit_box(src_w: int, src_h: int, tw: int, th: int, fit: str) -> tuple:
     """(scaled_w, scaled_h, x, y). crop: cover the box, (x, y) = where to cut from;
     pad: fit inside, (x, y) = where to paste into the box; stretch: the box itself."""
@@ -210,43 +263,64 @@ def decode_clip(path: str, start_s: float, frames: int, out_fps: float | None = 
                 container.seek(int(start_s / stream.time_base), stream=stream)
             except Exception:
                 pass
-        times, imgs = [], []
-        for frame in container.decode(stream):
-            t = float(frame.pts * stream.time_base) if frame.pts is not None else (times[-1] + 1 / src_fps if times else 0.0)
-            if t + 1.0 / src_fps < start_s:
-                continue
-            if t > stop_s:
-                break
+        # Only what is delivered is kept: the output tensor is allocated once and
+        # filled frame by frame, and a source frame is held only while it may still
+        # be picked (the review of 2026-10-16 measured ~20 GB peak for a 4K clip the
+        # old keep-everything-then-stack path let through a 6 GB cap).
+        dtype = torch.float16 if precision == "fp16" else torch.float32
+        out = torch.empty((-(-int(frames) // nth), th, tw, 3), dtype=dtype)
+        picker = FramePicker(fps, start_s, int(frames), nth)
+        n_out, held, held_id, last_t = 0, None, -1, None
+
+        def to_img(frame):
             img = frame.reformat(width=scw, height=sch, format="rgb24").to_ndarray()
             if fit == "crop" and size[0] == "box":
-                img = img[oy:oy + th, ox:ox + tw]
-            elif fit == "pad" and size[0] == "box":
+                return img[oy:oy + th, ox:ox + tw]
+            if fit == "pad" and size[0] == "box":
                 box = np.zeros((th, tw, 3), dtype=np.uint8)
                 box[oy:oy + sch, ox:ox + scw] = img
-                img = box
-            times.append(t)
-            imgs.append(img)
+                return box
+            return img
 
-    idx = pick_frames(times, fps, start_s, int(frames))
-    if not idx:
+        def put(img):
+            nonlocal n_out
+            out[n_out].copy_(torch.from_numpy(np.ascontiguousarray(img))).div_(255.0)
+            n_out += 1
+
+        fid = 0
+        for frame in container.decode(stream):
+            t = float(frame.pts * stream.time_base) if frame.pts is not None else (last_t + 1 / src_fps if last_t is not None else 0.0)
+            last_t = t
+            if t + 1.0 / src_fps < start_s:
+                continue
+            if t > stop_s or picker.done:
+                break
+            img = to_img(frame)
+            for ident in picker.feed(t, fid):
+                put(held if ident == held_id else img)
+            held, held_id = img, fid
+            fid += 1
+        for ident in picker.finish():
+            put(held)
+        targets = picker.k   # output frames resolved before thinning
+
+    if n_out == 0:
         raise RuntimeError(
             f"[Luna Asset Loader] No frames in {os.path.basename(path)} from {start_s:.2f}s — "
             f"the start may be past the end of the clip.")
-    got = len(idx)
+    got = targets
     if got < int(frames) and grid != "free":
         keep = snap_frames_down(got) if grid == "h3" else max(1, ((got - 1) // 8) * 8 + 1)
         if keep == 0:
             raise RuntimeError(
                 f"[Luna Asset Loader] {os.path.basename(path)} gave only {got} frame(s) from "
                 f"{start_s:.2f}s; MiniMax H3 needs at least {FRAME_PLUS}.")
-        idx = idx[:keep]
-    seconds = len(idx) / fps
-    idx = idx[::nth]
-    arr = np.stack([imgs[i] for i in idx])
-    t = torch.from_numpy(arr).to(torch.float16 if precision == "fp16" else torch.float32) / 255.0
+        targets = keep
+        n_out = min(n_out, -(-keep // nth))
+    t = out[:n_out]
     return t, {
-        "name": os.path.basename(path), "frames": len(idx), "asked": int(frames),
-        "short": got < int(frames), "seconds": seconds, "fps": fps / nth, "source_fps": src_fps,
+        "name": os.path.basename(path), "frames": n_out, "asked": int(frames),
+        "short": got < int(frames), "seconds": targets / fps, "fps": fps / nth, "source_fps": src_fps,
         "width": tw, "height": th, "source_size": (sw, sh), "start": start_s, "nth": nth,
     }
 
@@ -282,6 +356,7 @@ def filmstrip_jpeg(path: str, count: int = 12, height: int = 72) -> bytes:
         dur = (v.duration * v.time_base) if v.duration and v.time_base else (c.duration or 0) / 1_000_000.0
         dur = float(dur or 0.0)
         w = int(round((v.codec_context.width or 16) * height / float(v.codec_context.height or 9)))
+        w = max(8, min(w, 4 * height))   # an extreme aspect must not build a giant strip
         for k in range(count):
             t = dur * (k + 0.5) / count
             try:

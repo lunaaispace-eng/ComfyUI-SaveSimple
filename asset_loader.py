@@ -64,8 +64,9 @@ from PIL import Image, ImageOps
 import folder_paths
 import node_helpers
 
-from .asset_timeline import check_placements, h3_tags, newest_video, shot_frames, tail_start
-from .media_io import (FPS, clip_bytes, clip_soundtrack, decode_clip, filmstrip_jpeg, grid_frames,
+from .asset_timeline import (check_placements, h3_tags, newest_video, normalize_sound_role, shot_frames,
+                             tail_start, thinning_error)
+from .media_io import (FPS, clip_bytes, clip_soundtrack, decode_clip, filmstrip_jpeg, grid_frames, strip_annotation,
                        load_audio, load_audio_window, probe_media, song_shot_count, song_shot_start)
 
 MAX_IMAGES = 9  # MiniMax H3's own reference ceiling
@@ -166,7 +167,7 @@ def _parse_media(raw: str) -> dict:
             continue
         # Sound 1 is the song and drives the shot unless told otherwise; later
         # sounds are references for MiniMax H3 unless placed on the shot.
-        role = c.get("role") if c.get("role") in ("lock", "guide", "ref") else ("lock" if not cards else "ref")
+        role = normalize_sound_role(c.get("role"), len(cards))
         cards.append({
             "role": role,
             "at": max(0, int(c.get("at") or 0)),
@@ -361,9 +362,10 @@ class LunaAssetLoader:
     OUTPUT_TOOLTIPS = (
         "Every loaded picture as ONE IMAGE batch, conformed to image 1's size "
         "because a batch cannot hold mixed dimensions. For prompt writers "
-        "(Luna Agent Chat, LLM Prompt) which flatten it to individual JPEGs anyway.",
-        "Image 1's width AFTER its resize, for driving the generation nodes.",
-        "Image 1's height AFTER its resize.",
+        "(Luna Agent Chat, LLM Prompt) which flatten it to individual JPEGs anyway. Empty when only "
+        "clips or sounds are loaded.",
+        "Image 1's width AFTER its resize, for driving the generation nodes. With no pictures loaded: the wired width, else 0.",
+        "Image 1's height AFTER its resize. With no pictures loaded: the wired height, else 0.",
         "A one-line inventory — '<Picture 1> = 1920x1056 (20:11, landscape); ...' — "
         "plus a warning when pictures 1 and 2 differ in aspect ratio, which FL2VA "
         "silently fixes by stretching the first frame and cropping the last. "
@@ -455,12 +457,13 @@ class LunaAssetLoader:
         # A continuation from an output folder must re-run when a newer shot lands there.
         try:
             cont = _parse_media(media_state)["continuation"]
-            if cont["on"] and cont["from"] == "folder":
-                newest = _output_newest(cont["folder"])
-                if newest:
-                    s = os.stat(newest)
-                    m.update(f"{newest}|{s.st_size}|{s.st_mtime_ns}".encode("utf-8"))
-        except (RuntimeError, OSError):
+            # ... and when the picked continuation file is overwritten under the same name.
+            if cont["on"] and cont["from"] in ("folder", "file"):
+                src = _output_newest(cont["folder"]) if cont["from"] == "folder" else _media_file(cont["file"])
+                if src:
+                    s = os.stat(src)
+                    m.update(f"{src}|{s.st_size}|{s.st_mtime_ns}".encode("utf-8"))
+        except (RuntimeError, OSError, ValueError):
             pass
         return m.hexdigest()
 
@@ -584,7 +587,15 @@ class LunaAssetLoader:
         if carry is not None:
             timeline["items"].insert(0, carry)
         numbered: list = [frames[i] if i < len(frames) else None for i in range(MAX_IMAGES)]
-        w, h = dims[0] if dims else (0, 0)
+        if dims:
+            w, h = dims[0]
+        else:
+            # No pictures: hand on the canvas size when it is wired rather than a
+            # silent 0x0; `images` and image_N stay empty (never black frames).
+            w = int(width) if width and int(width) > 0 else 0
+            h = int(height) if height and int(height) > 0 else 0
+            if not (w and h):
+                print("[Luna Asset Loader] No pictures loaded and no width/height wired: width and height are 0.")
         result = (_conform(frames) if frames else None, w, h, brief, audio, refs, timeline) + tuple(numbered)
         return {"ui": {"luna_asset_audio": [song] if song else []}, "result": result}
 
@@ -594,9 +605,12 @@ class LunaAssetLoader:
         out = []
         box = (int(width), int(height)) if width and height and int(width) > 0 and int(height) > 0 else None
         for k, c in enumerate(clips, 1):
-            path = folder_paths.get_annotated_filepath(c["file"])
-            if not path or not os.path.isfile(path):
+            path = _media_file(c["file"])
+            if not path:
                 raise RuntimeError(f"[Luna Asset Loader] Clip not found in the input folder: {c['file']}")
+            bad = thinning_error(c["count"], c["nth"])
+            if bad:
+                raise RuntimeError(f"[Luna Asset Loader] Clip V{k} ({c['file']}): {bad}")
             info = probe_media(path)
             if not info.get("video"):
                 raise RuntimeError(f"[Luna Asset Loader] {c['file']} has no picture, only sound.")
@@ -635,8 +649,8 @@ class LunaAssetLoader:
         if not cards:
             return None, None, ""
         c = cards[0]
-        path = folder_paths.get_annotated_filepath(c["file"])
-        if not path or not os.path.isfile(path):
+        path = _media_file(c["file"])
+        if not path:
             raise RuntimeError(f"[Luna Asset Loader] Song not found in the input folder: {c['file']}")
         wired = seconds is not None and float(seconds) > 0
         want = float(seconds) if wired else c["duration"]
@@ -700,7 +714,7 @@ class LunaAssetLoader:
                                    f"the continuation needs {n}.")
             name, src = "previous_frames", "the previous_frames input"
         else:
-            path = _output_newest(cont["folder"]) if cont["from"] == "folder" else _input_file(cont["file"])
+            path = _output_newest(cont["folder"]) if cont["from"] == "folder" else _media_file(cont["file"])
             if not path:
                 where = (f"the output folder '{cont['folder'] or '(output)'}'" if cont["from"] == "folder"
                          else f"the input folder ('{cont['file']}')")
@@ -728,10 +742,12 @@ class LunaAssetLoader:
         Cut to their window, never filled: a reference ends where it ends."""
         out = {}
         for j, c in enumerate(cards):
-            if j == 0 or c["role"] not in ("ref", "guide"):
+            # Sound 1 as a guide or locked uses the song window (`audio`); as a
+            # reference it is loaded here like any other reference sound.
+            if c["role"] not in ("ref", "guide") or (j == 0 and c["role"] != "ref"):
                 continue
-            path = folder_paths.get_annotated_filepath(c["file"])
-            if not path or not os.path.isfile(path):
+            path = _media_file(c["file"])
+            if not path:
                 raise RuntimeError(f"[Luna Asset Loader] Sound not found in the input folder: {c['file']}")
             clip, info = load_audio(path, c["start"], c["duration"])
             out[j] = (clip, f"{info['name']} {_clock(info['start'])}-{_clock(info['start'] + info['seconds'])} "
@@ -783,38 +799,59 @@ class LunaAssetLoader:
         return {"version": 2, "fps": FPS, "frames": shot_len, "items": items}
 
 
-def _input_file(name: str):
-    """A file name from the browser -> a real file inside ComfyUI's input folder, or None.
+def _inside(root_dir: str, rel: str, kind: str = "file"):
+    """`rel` resolved inside `root_dir`, or None. The name is screened BEFORE
+    anything touches the disk: on Windows merely resolving \\\\host\\share opens
+    SMB, and the routes and /prompt take any caller's input. A junction or link
+    that leads outside the folder (even onto another drive) is refused too."""
+    if not isinstance(rel, str) or "\x00" in rel:
+        return None
+    if rel and (os.path.isabs(rel) or rel.startswith(("\\", "/")) or ":" in rel
+                or ".." in rel.replace("\\", "/").split("/")):
+        return None
+    root = os.path.realpath(root_dir)
+    path = os.path.realpath(os.path.join(root, rel))
+    try:
+        if os.path.commonpath([root, path]) != root:
+            return None
+    except ValueError:   # different drives: certainly not inside
+        return None
+    ok = os.path.isfile(path) if kind == "file" else os.path.isdir(path)
+    return path if ok else None
 
-    The name is screened BEFORE anything touches the disk: on Windows merely
-    resolving \\\\host\\share opens SMB, and these routes take any caller's input."""
-    if not name or not isinstance(name, str) or "\x00" in name:
+
+def _input_file(name: str):
+    """A file name from the browser -> a real file inside ComfyUI's input folder, or None."""
+    if not name or not isinstance(name, str):
         return None
-    bare = name.split(" [")[0]
-    if os.path.isabs(bare) or bare.startswith(("\\", "/")) or ":" in bare or ".." in bare.replace("\\", "/").split("/"):
+    return _inside(folder_paths.get_input_directory(), strip_annotation(name)[0])
+
+
+def _media_file(name: str):
+    """A sound or clip named in media_state -> a real file, or None. Plain names live
+    in the input folder; a trailing ' [output]' / ' [temp]' tag (ComfyUI's own
+    annotation) selects those folders. Nothing outside them is ever read."""
+    if not name or not isinstance(name, str):
         return None
-    root = os.path.realpath(folder_paths.get_input_directory())
-    path = os.path.realpath(os.path.join(root, bare))
-    if os.path.commonpath([root, path]) != root or not os.path.isfile(path):
-        return None
-    return path
+    bare, tag = strip_annotation(name)
+    root = {"output": folder_paths.get_output_directory(),
+            "temp": folder_paths.get_temp_directory()}.get(tag, folder_paths.get_input_directory())
+    return _inside(root, bare)
 
 
 def _output_newest(folder: str):
     """The newest video in a folder under ComfyUI's output folder ('' = the output
     folder itself), or None. The folder name is screened like _input_file's."""
-    root = os.path.realpath(folder_paths.get_output_directory())
-    folder = (folder or "").strip().strip("/\\")
-    if folder and (os.path.isabs(folder) or ":" in folder or ".." in folder.replace("\\", "/").split("/")):
-        return None
-    base = os.path.realpath(os.path.join(root, folder))
-    if os.path.commonpath([root, base]) != root or not os.path.isdir(base):
+    base = _inside(folder_paths.get_output_directory(), (folder or "").strip().strip("/\\"), "dir")
+    if not base:
         return None
     files = [(n, os.path.getmtime(os.path.join(base, n))) for n in os.listdir(base)
              if os.path.isfile(os.path.join(base, n))]
     name = newest_video(files)
     return os.path.join(base, name) if name else None
 
+
+import asyncio
 
 try:
     from aiohttp import web
@@ -830,7 +867,8 @@ if PromptServer is not None:
         if not path:
             return web.json_response({"error": "not found"}, status=404)
         try:
-            return web.json_response(probe_media(path))
+            # Decoding off the event loop: a long file must not stall the whole server.
+            return web.json_response(await asyncio.get_running_loop().run_in_executor(None, probe_media, path))
         except Exception as e:
             return web.json_response({"error": f"cannot read: {type(e).__name__}"}, status=415)
 
@@ -842,7 +880,8 @@ if PromptServer is not None:
             return web.json_response({"name": None})
         info = {"name": os.path.basename(path), "mtime": os.path.getmtime(path)}
         try:
-            info.update({k: v for k, v in probe_media(path).items() if k in ("duration", "fps", "width", "height")})
+            pm = await asyncio.get_running_loop().run_in_executor(None, probe_media, path)
+            info.update({k: v for k, v in pm.items() if k in ("duration", "fps", "width", "height")})
         except Exception:
             pass
         return web.json_response(info)
@@ -858,7 +897,7 @@ if PromptServer is not None:
         except ValueError:
             n = 12
         try:
-            data = filmstrip_jpeg(path, n)
+            data = await asyncio.get_running_loop().run_in_executor(None, filmstrip_jpeg, path, n)
         except Exception:
             return web.Response(status=415)
         return web.Response(body=data, content_type="image/jpeg",
