@@ -166,6 +166,28 @@ const CSS = `
 .luna-al-strip { position:relative; height:46px; border-radius:6px; background-color:#101116;
                  background-size:100% 100%; background-repeat:no-repeat; overflow:hidden; cursor:crosshair; }
 .luna-al-sect { font-size:10.5px; color:var(--luna-accent); font-weight:600; margin-top:2px; }
+
+/* The shot timeline (v3): the video being generated, one lane per kind. */
+.luna-al-tl { border:1px solid var(--luna-border); border-radius:8px; background:var(--luna-bg); padding:7px;
+              display:flex; flex-direction:column; gap:4px; }
+.luna-al-tlh { display:flex; align-items:center; gap:7px; font-size:10.5px; color:var(--luna-muted); }
+.luna-al-tlh b { color:var(--luna-text); }
+.luna-al-tlh .sp { flex:1 1 auto; }
+.luna-al-lane { display:grid; grid-template-columns:76px 1fr; align-items:center; gap:6px; }
+.luna-al-lane .ln { font-size:10px; color:var(--luna-muted); text-align:right; }
+.luna-al-track { position:relative; height:24px; border-radius:5px; background:#101116; border:1px solid #1f2129; }
+.luna-al-truler { position:relative; height:13px; font-size:9.5px; color:var(--luna-muted); }
+.luna-al-truler span { position:absolute; transform:translateX(-50%); white-space:nowrap; }
+.luna-al-blk { position:absolute; top:2px; bottom:2px; border-radius:4px; cursor:grab; font-size:9.5px; font-weight:600;
+               color:var(--luna-bg); display:flex; align-items:center; padding:0 5px; white-space:nowrap; overflow:hidden;
+               box-sizing:border-box; min-width:6px; }
+.luna-al-blk.vid { background:#d98a6a; } .luna-al-blk.snd { background:#e07bb4; }
+.luna-al-blk.key { width:20px; margin-left:-10px; justify-content:center; padding:0; background:var(--luna-accent); }
+.luna-al-blk.sel { box-shadow:0 0 0 2px #fff; }
+.luna-al-refs { display:flex; gap:4px; flex-wrap:wrap; align-items:center; min-height:22px; }
+.luna-al-chip { font-size:9.5px; font-weight:700; padding:2px 6px; border-radius:5px; cursor:pointer; color:var(--luna-bg); }
+.luna-al-chip.p { background:var(--luna-accent); } .luna-al-chip.v { background:#d98a6a; } .luna-al-chip.a { background:#e07bb4; }
+.luna-al-tlnote { font-size:10px; color:var(--luna-muted); line-height:1.4; }
 `;
 
 function injectCSS() {
@@ -257,8 +279,15 @@ function syncAccent(node, rootEl) {
     rootEl.style.setProperty("--luna-accent-soft", accent + "22");
 }
 
-const viewURL = (name) =>
-    `/view?filename=${encodeURIComponent(name)}&type=input&subfolder=&rand=${Math.random()}`;
+// One cache-busting token per file per page load: a fresh one on EVERY call made
+// each re-render download every thumbnail again (seen 2026-10-16 once the editors
+// re-render on each change). Uploads never overwrite (overwrite=false gives a new
+// name), so a stable URL cannot show a stale picture.
+const _viewTok = new Map();
+const viewURL = (name) => {
+    if (!_viewTok.has(name)) _viewTok.set(name, Math.random().toString(36).slice(2));
+    return `/view?filename=${encodeURIComponent(name)}&type=input&subfolder=&rand=${_viewTok.get(name)}`;
+};
 // Stable URL for sound files: the waveform decode and the player share the
 // browser's cache instead of downloading a song twice.
 const soundURL = (name) => `/view?filename=${encodeURIComponent(name)}&type=input&subfolder=`;
@@ -287,6 +316,30 @@ function mediaInfo(file) {
     return _mediaInfo.get(file);
 }
 const stripURL = (file, n) => `/lunasave/filmstrip?file=${encodeURIComponent(file)}&n=${n}`;
+
+// Roles: a reference is shown to H3 and named in the prompt; "on the shot" is
+// anchored at a frame. Defaults: pictures and clips are references, sound 1 is
+// the song locked to the shot, later sounds are references.
+const picRole = (m, i) => (m.pictures[i]?.role === "key" ? "key" : "ref");
+const clipRole = (c) => (c.role === "guide" ? "guide" : "ref");
+const soundRole = (c, j) => (["lock", "guide", "ref"].includes(c.role) ? c.role : j === 0 ? "lock" : "ref");
+
+// Mirror of asset_timeline.h3_tags: H3 numbers ONLY the references, in order, so
+// a keyframe on card 1 makes card 2 <Picture 1>. Sound order: each reference
+// clip's kept soundtrack, then the standalone reference sounds.
+function h3Tags(node) {
+    const m = readMedia(node), n = readPaths(node).length;
+    const out = { pictures: {}, videos: {}, videoAudio: {}, sounds: {} };
+    let p = 0, v = 0, a = 0;
+    for (let i = 0; i < n; i++) if (picRole(m, i) === "ref") out.pictures[i] = `<Picture ${++p}>`;
+    m.video.forEach((c, k) => {
+        if (clipRole(c) !== "ref") return;
+        if (c.sound !== "drop") out.videoAudio[k] = `<Audio ${++a}>`;   // if the file has sound
+        out.videos[k] = `<Video ${++v}>`;
+    });
+    m.audio.forEach((c, j) => { if (soundRole(c, j) === "ref") out.sounds[j] = `<Audio ${++a}>`; });
+    return out;
+}
 
 // H3 clip lengths are 17k+5 frames; step to the previous / next one.
 function stepH3Frames(n, dir) {
@@ -321,8 +374,10 @@ function readMedia(node) {
         return {
             audio: Array.isArray(m.audio) ? m.audio.filter((c) => c && c.file) : [],
             video: Array.isArray(m.video) ? m.video.filter((c) => c && c.file) : [],
+            pictures: Array.isArray(m.pictures) ? m.pictures.map((p) => p || {}) : [],
+            shot: m.shot && Number(m.shot.frames) > 0 ? { frames: Number(m.shot.frames) } : null,
         };
-    } catch { return { audio: [], video: [] }; }
+    } catch { return { audio: [], video: [], pictures: [], shot: null }; }
 }
 
 function writeMedia(node, m) {
@@ -331,6 +386,9 @@ function writeMedia(node, m) {
     const out = {};
     if (m.audio?.length) out.audio = m.audio;
     if (m.video?.length) out.video = m.video;
+    // Picture roles only matter once one of them is not a plain reference.
+    if (m.pictures?.some((p) => p?.role === "key")) out.pictures = m.pictures;
+    if (m.shot?.frames) out.shot = m.shot;
     w.value = Object.keys(out).length ? JSON.stringify(out) : "";
     w.callback?.(w.value);
     node.graph?.setDirtyCanvas(true, true);
@@ -774,7 +832,12 @@ function buildUI(node) {
     ved.className = "luna-al-ved";
     ved.style.display = "none";
     for (const ev of ["pointerdown", "keydown", "wheel"]) ved.addEventListener(ev, (e) => e.stopPropagation());
-    root.append(bar, cards, preview, panel, aed, ved);
+    // The shot timeline: what is anchored where in the video being generated.
+    const tl = document.createElement("div");
+    tl.className = "luna-al-tl";
+    tl.style.display = "none";
+    for (const ev of ["pointerdown", "keydown", "wheel"]) tl.addEventListener(ev, (e) => e.stopPropagation());
+    root.append(bar, cards, tl, preview, panel, aed, ved);
 
     let selected = 0;                 // which card the resize panel edits
     let selAudio = -1;                // which sound card the song editor edits; -1 = none
@@ -807,7 +870,7 @@ function buildUI(node) {
     mkBtn("Upload", "", () => picker.click());
     mkBtn("Clear", "danger", () => {
         writePaths(node, []); syncCount(node, 0);
-        writeMedia(node, { audio: [], video: [] }); selAudio = -1; selVideo = -1;
+        writeMedia(node, { audio: [], video: [], pictures: [], shot: readMedia(node).shot }); selAudio = -1; selVideo = -1;
         render();
     });
 
@@ -989,6 +1052,9 @@ function buildUI(node) {
                 ev.stopPropagation();
                 const next = readPaths(node);
                 next.splice(i, 1);
+                // A picture's role travels with it.
+                const m = readMedia(node);
+                if (m.pictures.length > i) { m.pictures.splice(i, 1); writeMedia(node, m); }
                 writePaths(node, next);
                 syncCount(node, next.length);
                 render();
@@ -1005,6 +1071,14 @@ function buildUI(node) {
                 const next = readPaths(node);
                 const [moved] = next.splice(dragFrom, 1);
                 next.splice(i, 0, moved);
+                // Keep each picture's role with the picture, not with the slot.
+                const m = readMedia(node);
+                if (m.pictures.some((p) => p?.role === "key")) {
+                    while (m.pictures.length < Math.max(next.length, dragFrom + 1)) m.pictures.push({});
+                    const [mr] = m.pictures.splice(dragFrom, 1);
+                    m.pictures.splice(i, 0, mr);
+                    writeMedia(node, m);
+                }
                 writePaths(node, next);   // reorder IS the renumbering
                 render();
             });
@@ -1098,6 +1172,7 @@ function buildUI(node) {
         });
 
         syncAccent(node, root);
+        renderTimeline();
         renderPreview();
         renderPanel();
         renderAudio();
@@ -1134,8 +1209,8 @@ function buildUI(node) {
         }
         const nat = natural.get(name);
         previewLbl.textContent = nat
-            ? `<Picture ${selected + 1}>  ${nat[0]}×${nat[1]} ${describeAR(nat[0], nat[1]).short}`
-            : `<Picture ${selected + 1}>`;
+            ? `${picLabel(selected)}  ${nat[0]}×${nat[1]} ${describeAR(nat[0], nat[1]).short}`
+            : picLabel(selected);
     }
 
     /* ------------------------------------------------------------- resize panel */
@@ -1185,9 +1260,14 @@ function buildUI(node) {
         who.className = "luna-al-io";
         const out = nat ? predictSize(nat[0], nat[1], st) : null;
         who.innerHTML = nat
-            ? `<b>&lt;Picture ${selected + 1}&gt;</b> &nbsp; ${nat[0]}×${nat[1]} → <b>${out[0]}×${out[1]}</b>`
-            : `<b>&lt;Picture ${selected + 1}&gt;</b>`;
+            ? `<b>${picLabel(selected).replace(/</g, "&lt;").replace(/>/g, "&gt;")}</b> &nbsp; ${nat[0]}×${nat[1]} → <b>${out[0]}×${out[1]}</b>`
+            : `<b>${picLabel(selected).replace(/</g, "&lt;").replace(/>/g, "&gt;")}</b>`;
         head.appendChild(who);
+
+        // Reference for H3, or a keyframe anchored on the shot.
+        const mm = readMedia(node);
+        roleRow(panel, "p", selected, [["ref", "Reference"], ["key", "Keyframe on the shot"]],
+                picRole(mm, selected), Number(mm.pictures[selected]?.at) || 0, 1);
 
         const r1 = row("Size");
         seg(r1, [["off", "Off"], ["max_mp", "Max MP"], ["longest_side", "Longest"],
@@ -1246,6 +1326,167 @@ function buildUI(node) {
         r6.append(all, reset);
     }
 
+    // What H3 calls picture card i: its real tag when it is a reference, or that it is a keyframe.
+    const picLabel = (i) => h3Tags(node).pictures[i] || `Card ${i + 1} · keyframe`;
+
+    /* ------------------------------------------------------- shot timeline */
+
+    // The shot length in frames: the wired seconds when there are any, else the
+    // length kept on the node (124 frames = MiniMax H3's 5.17 s default).
+    function shotLen() {
+        const ws = wiredSeconds();
+        if (ws.wired && ws.value > 0) return { frames: Math.round(ws.value * H3_FPS), from: ws.from };
+        return { frames: readMedia(node).shot?.frames || 124, from: "" };
+    }
+
+    // Patch one card's role/placement. kind: "p" (picture index), "v", "a".
+    function setPlacement(kind, i, patch) {
+        const m = readMedia(node);
+        if (kind === "p") {
+            while (m.pictures.length <= i) m.pictures.push({});
+            m.pictures[i] = { ...m.pictures[i], ...patch };
+        } else {
+            const list = kind === "v" ? m.video : m.audio;
+            if (!list[i]) return;
+            list[i] = { ...list[i], ...patch };
+        }
+        writeMedia(node, m);
+        render();
+    }
+
+    // A clip's length on the shot, in output frames — what the guide will hold.
+    const clipLen = (c) => {
+        const f = Math.max(1, Number(c.frames) || 124);
+        const n = (c.count || "target") === "target" ? nearestH3Frames(f) : f;
+        return Math.ceil(n / Math.max(1, Number(c.nth) || 1));
+    };
+
+    // The role row every editor shows: which role, and the frame when it has one.
+    function roleRow(host, kind, i, roles, cur, at, len) {
+        const S = shotLen().frames;
+        const row = document.createElement("div");
+        row.className = "luna-al-row";
+        row.innerHTML = `<div class="luna-al-lbl">Role</div><div class="luna-al-seg"></div>`;
+        const segEl = row.querySelector(".luna-al-seg");
+        for (const [val, text] of roles) {
+            const o = document.createElement("div");
+            o.className = "luna-al-opt" + (val === cur ? " on" : "");
+            o.textContent = text;
+            o.onclick = () => setPlacement(kind, i, { role: val, at: Math.min(at || 0, Math.max(0, S - len)) });
+            segEl.appendChild(o);
+        }
+        host.appendChild(row);
+        if (cur === "ref") return;
+        const r2 = document.createElement("div");
+        r2.className = "luna-al-row";
+        r2.innerHTML = `<div class="luna-al-lbl">At frame</div><div class="luna-al-nf"><span class="luna-al-nud" data-a="first" title="The first frame">First</span><input class="at" style="width:52px"><span class="luna-al-nud" data-a="last" title="As late as it fits">Last</span><span class="luna-al-lock"></span></div>`;
+        const inp = r2.querySelector(".at");
+        inp.value = String(at || 0);
+        r2.querySelector(".luna-al-lock").textContent = `of ${S} · ${((at || 0) / H3_FPS).toFixed(2)} s`;
+        const set = (v) => setPlacement(kind, i, { at: Math.max(0, Math.min(Math.round(v), Math.max(0, S - len))) });
+        inp.onchange = () => { const v = Number(inp.value); if (Number.isFinite(v)) set(v); };
+        inp.addEventListener("keydown", (e) => { if (e.key === "Enter") inp.blur(); e.stopPropagation(); });
+        r2.querySelector('[data-a="first"]').onclick = () => set(0);
+        r2.querySelector('[data-a="last"]').onclick = () => set(S - len);
+        host.appendChild(r2);
+    }
+
+    function renderTimeline() {
+        const m = readMedia(node), paths = readPaths(node);
+        if (!paths.length && !m.video.length && !m.audio.length) { tl.style.display = "none"; tl.replaceChildren(); return; }
+        tl.style.display = "";
+        const { frames: S, from } = shotLen();
+        const tags = h3Tags(node);
+        tl.innerHTML = `
+            <div class="luna-al-tlh"><span>Shot</span><b>${S} frames · ${(S / H3_FPS).toFixed(2)} s</b>
+              <span>${from ? `from ${from.replace(/[<>&]/g, "")}` : "set here"}</span><span class="sp"></span>
+              ${from ? "" : `<span class="luna-al-nud" data-s="-1" title="17 frames shorter">−</span><span class="luna-al-nud" data-s="1" title="17 frames longer">+</span>`}</div>
+            <div class="luna-al-lane"><span></span><div class="luna-al-truler"></div></div>
+            <div class="luna-al-lane"><span class="ln">Pictures</span><div class="luna-al-track" data-k="p"></div></div>
+            <div class="luna-al-lane"><span class="ln">Clips</span><div class="luna-al-track" data-k="v"></div></div>
+            <div class="luna-al-lane"><span class="ln">Sounds</span><div class="luna-al-track" data-k="a"></div></div>
+            <div class="luna-al-lane"><span class="ln">References</span><div class="luna-al-refs"></div></div>
+            <div class="luna-al-tlnote"></div>`;
+        const q = (s) => tl.querySelector(s);
+        const ruler = q(".luna-al-truler"), stepR = S > 200 ? 48 : 24;
+        for (let f = 0; f <= S; f += stepR) {
+            const sp = document.createElement("span");
+            sp.style.left = `${f / S * 100}%`;
+            sp.textContent = String(f);
+            ruler.appendChild(sp);
+        }
+        tl.querySelectorAll("[data-s]").forEach((b) => {
+            b.onclick = () => {
+                const mm = readMedia(node);
+                mm.shot = { frames: Math.max(5, Math.min(362, S + 17 * Number(b.dataset.s))) };
+                writeMedia(node, mm); render();
+            };
+        });
+
+        // One draggable item on a lane; dragging changes its frame, a click selects its card.
+        const place = (track, cls, kind, i, at, len, label, title, isSel) => {
+            const el = document.createElement("div");
+            el.className = `luna-al-blk ${cls}` + (isSel ? " sel" : "");
+            el.textContent = label;
+            el.title = title;
+            const pos = (a) => {
+                if (cls === "key") el.style.left = `${(a + 0.5) / S * 100}%`;
+                else { el.style.left = `${a / S * 100}%`; el.style.width = `${Math.max(0.8, Math.min(len, S - a) / S * 100)}%`; }
+            };
+            pos(at);
+            let d = null;
+            el.addEventListener("pointerdown", (e) => { d = { x: e.clientX, at, moved: false }; el.setPointerCapture(e.pointerId); e.preventDefault(); });
+            el.addEventListener("pointermove", (e) => {
+                if (!d) return;
+                const df = (e.clientX - d.x) / track.getBoundingClientRect().width * S;
+                const a = Math.max(0, Math.min(Math.round(d.at + df), Math.max(0, S - (cls === "key" ? 1 : len))));
+                if (a !== d.cur) { d.cur = a; d.moved = true; pos(a); el.title = `${title} — frame ${a}`; }
+            });
+            const up = () => {
+                if (!d) return;
+                const moved = d.moved, a = d.cur;
+                d = null;
+                if (moved) setPlacement(kind, i, { at: a }); else pick(kind, i);
+            };
+            el.addEventListener("pointerup", up);
+            el.addEventListener("pointercancel", up);
+            track.appendChild(el);
+        };
+
+        const tp = q('[data-k="p"]'), tv = q('[data-k="v"]'), ta = q('[data-k="a"]'), refs = q(".luna-al-refs");
+        const chip = (cls, text, kind, i, title) => {
+            const c = document.createElement("span");
+            c.className = `luna-al-chip ${cls}`;
+            c.textContent = text;
+            c.title = title;
+            c.onclick = () => pick(kind, i);
+            refs.appendChild(c);
+        };
+        paths.forEach((name, i) => {
+            if (picRole(m, i) === "key") {
+                const at = Number(m.pictures[i]?.at) || 0;
+                place(tp, "key", "p", i, at, 1, String(i + 1), `Picture card ${i + 1} — keyframe at frame ${at}`, selAudio < 0 && selVideo < 0 && selected === i);
+            } else chip("p", `${tags.pictures[i]} = ${i + 1}`, "p", i, `${tags.pictures[i]} in the prompt is picture card ${i + 1} (${name})`);
+        });
+        m.video.forEach((c, k) => {
+            if (clipRole(c) === "guide") {
+                const len = clipLen(c), at = Number(c.at) || 0;
+                place(tv, "vid", "v", k, at, len, `V${k + 1} · ${at}–${at + len - 1}`, `Clip V${k + 1} on the shot`, selVideo === k);
+            } else chip("v", `${tags.videos[k]} = V${k + 1}` + (tags.videoAudio[k] ? ` + ${tags.videoAudio[k]}` : ""), "v", k,
+                `${tags.videos[k]} in the prompt is clip card V${k + 1}` + (tags.videoAudio[k] ? `; its sound is ${tags.videoAudio[k]}` : ""));
+        });
+        m.audio.forEach((c, j) => {
+            const role = soundRole(c, j);
+            if (role === "ref") { chip("a", `${tags.sounds[j]} = A${j + 1}`, "a", j, `${tags.sounds[j]} in the prompt is sound card A${j + 1}`); return; }
+            const at = Number(c.at) || 0;
+            place(ta, "snd", "a", j, at, S - at, `A${j + 1} · ${role === "lock" ? "locked" : "guide"} from ${at}`,
+                `Sound A${j + 1} ${role === "lock" ? "locked — the picture follows it" : "as a guide"}, from frame ${at}`, selAudio === j);
+        });
+        if (!refs.children.length) refs.innerHTML = `<span class="luna-al-tlnote">none — everything is on the shot</span>`;
+        q(".luna-al-tlnote").textContent = "MiniMax H3: pictures anchor at any frame; a clip must be 17k+5 frames and end inside the shot; "
+            + "a sound runs from its frame to the end. H3 numbers only the references, in this order.";
+    }
+
     /* -------------------------------------------------------- song editor */
 
     // What the `seconds` input says, when it is wired. The frontend can read a
@@ -1283,7 +1524,8 @@ function buildUI(node) {
     // Rows of the editor beyond the base, for the node's arithmetic height.
     const audioExtraRows = () => {
         const c = readMedia(node).audio[selAudio];
-        return 1 + (c?.position === "shot" ? 2 : 0);
+        const role = c ? soundRole(c, selAudio) : "ref";
+        return 1 + (c?.position === "shot" ? 2 : 0) + 1 + (role !== "ref" ? 1 : 0);   // + Role, + At frame
     };
 
     let player = null, playRaf = 0;
@@ -1324,6 +1566,7 @@ function buildUI(node) {
               <span class="l">Duration</span><div class="luna-al-nf"><input class="du"><span class="luna-al-lock dl"></span></div>
               <span class="l">Window</span><div class="luna-al-nf"><input class="en" readonly tabindex="-1" style="width:120px"></div><span></span><span></span>
             </div>
+            <div class="rolehost" style="display:flex;flex-direction:column;gap:5px"></div>
             <div class="luna-al-row"><div class="luna-al-lbl">Position</div><div class="luna-al-seg pos"></div></div>
             <div class="luna-al-row shotrow"><div class="luna-al-lbl">Shot</div>
               <div class="luna-al-nf"><span class="luna-al-nud" data-s="-1" title="Previous shot">◀</span><input class="sn" style="width:46px"><span class="luna-al-nud" data-s="1" title="Next shot">▶</span><span class="luna-al-lock sl"></span></div></div>
@@ -1336,6 +1579,9 @@ function buildUI(node) {
         const wave = $(".luna-al-wave"), win = $(".luna-al-win"), zoom = $(".luna-al-zoom");
         const [phW, phZ] = aed.querySelectorAll(".luna-al-ph");
         const iSt = $(".st"), iDu = $(".du"), iEn = $(".en"), iSn = $(".sn");
+        roleRow($(".rolehost"), "a", idx,
+                [["lock", "Lock to shot"], ["guide", "Guide at frame"], ["ref", "Reference"]],
+                soundRole(card, idx), Number(card.at) || 0, 1);
 
         const total = () => info?.duration || 0;
         // dur 0 means "to the end of the file"; a wired seconds input wins over both.
@@ -1606,6 +1852,7 @@ function buildUI(node) {
               <span class="l">Start</span><div class="luna-al-nf"><span class="luna-al-nud" data-n="-1" title="One source frame earlier">◀</span><input class="st"><span class="luna-al-nud" data-n="1" title="One source frame later">▶</span></div>
               <span class="l">Length</span><div class="luna-al-nf"><span class="luna-al-nud" data-f="-1" title="Shorter">−</span><input class="fr" style="width:56px"><span class="luna-al-nud" data-f="1" title="Longer">+</span><span class="luna-al-lock fl"></span></div>
             </div>
+            <div class="rolehost" style="display:flex;flex-direction:column;gap:5px"></div>
             <div class="luna-al-sect">Load settings</div>
             <div class="luna-al-row"><div class="luna-al-lbl">Frame rate</div><div class="luna-al-seg fps"></div></div>
             <div class="luna-al-row"><div class="luna-al-lbl">Frames</div><div class="luna-al-seg cnt"></div></div>
@@ -1619,6 +1866,8 @@ function buildUI(node) {
         $(".nm").textContent = card.file;
         const video = $("video"), strip = $(".luna-al-strip"), win = $(".luna-al-win");
         const iSt = $(".st"), iFr = $(".fr");
+        roleRow($(".rolehost"), "v", idx, [["ref", "Reference"], ["guide", "On the shot"]],
+                clipRole(card), Number(card.at) || 0, clipLen(card));
         video.src = soundURL(card.file);
         strip.style.backgroundImage = `url("${stripURL(card.file, 16)}")`;
 
@@ -1781,11 +2030,19 @@ function buildUI(node) {
         video.addEventListener("loadedmetadata", () => { try { video.currentTime = start; } catch { /* not seekable yet */ } });
     }
 
-    const videoHeight = () => 572;   // added up from its rows, like AUDIO_H; never measured
+    // Added up from its rows, like AUDIO_H; never measured. + Role, + At frame.
+    const videoHeight = () => {
+        const c = readMedia(node).video[selVideo];
+        return 572 + 28 + (c && clipRole(c) === "guide" ? 28 : 0);
+    };
+    const timelineHeight = () => {
+        const m = readMedia(node);
+        return readPaths(node).length || m.video.length || m.audio.length ? 222 : 0;
+    };
 
     return { root, render, selectCard: (i) => { selected = i; renderPanel(); }, natural,
              audioOpen: () => selAudio >= 0, audioExtraRows,
-             videoOpen: () => selVideo >= 0, videoHeight };
+             videoOpen: () => selVideo >= 0, videoHeight, timelineHeight };
 }
 
 /* ---------------------------------------------------------------- register */
@@ -1819,25 +2076,27 @@ app.registerExtension({
                 const md = readMedia(this), sounds = md.audio.length + md.video.length;
                 const cols = Math.max(1, Math.floor((this.size[0] - 24) / CELL));
                 const rows = Math.max(1, Math.ceil((list.length + sounds) / cols));
+                const tlh = ui.timelineHeight();
                 if (ui.videoOpen()) {
-                    const h = ui.videoHeight();
+                    const h = ui.videoHeight() + tlh;
                     return Math.min(MAXH + h, BAR + PAD + rows * CELL + h);
                 }
                 if (ui.audioOpen()) {
-                    const h = AUDIO_H + ui.audioExtraRows() * 28;   // Position, then Shot + Overlap in shot mode
+                    const h = AUDIO_H + ui.audioExtraRows() * 28 + tlh;   // Position, Shot + Overlap, Role, At frame
                     return Math.min(MAXH + h, BAR + PAD + rows * CELL + h);
                 }
                 // The resize panel only exists once there is something to resize,
-                // and grows a row when a mode or a ratio is chosen.
+                // and grows a row when a mode or a ratio is chosen (and with the role rows).
                 let panel = 0;
                 if (list.length) {
                     const st = itemAt(this, 0);
-                    panel = 118 + (st.mode !== "off" ? 26 : 0) + (st.ratio ? 26 : 0);
+                    const key = readMedia(this).pictures.some((p) => p?.role === "key");
+                    panel = 118 + (st.mode !== "off" ? 26 : 0) + (st.ratio ? 26 : 0) + 28 + (key ? 28 : 0);
                 }
                 // The preview is a fixed block, so it stays arithmetic like the
                 // rest — nothing here is measured from the rendered layout.
                 const pv = list.length ? PREVIEW_H + 6 : 0;
-                return Math.min(MAXH, Math.max(MINH, BAR + PAD + rows * CELL + pv + panel));
+                return Math.min(MAXH + tlh, Math.max(MINH, BAR + PAD + rows * CELL + pv + panel + tlh));
             };
             const w = this.addDOMWidget("luna_asset_cards", "div", ui.root, {
                 serialize: false,

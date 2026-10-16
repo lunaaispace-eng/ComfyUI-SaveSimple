@@ -64,8 +64,9 @@ from PIL import Image, ImageOps
 import folder_paths
 import node_helpers
 
+from .asset_timeline import check_placements, h3_tags, shot_frames
 from .media_io import (FPS, clip_bytes, clip_soundtrack, decode_clip, filmstrip_jpeg, grid_frames,
-                       load_audio_window, probe_media, song_shot_count, song_shot_start)
+                       load_audio, load_audio_window, probe_media, song_shot_count, song_shot_start)
 
 MAX_IMAGES = 9  # MiniMax H3's own reference ceiling
 MAX_SOUNDS = 3  # MiniMax H3 takes three standalone sounds
@@ -163,7 +164,12 @@ def _parse_media(raw: str) -> dict:
     for c in (data.get("audio") or [])[:MAX_SOUNDS]:
         if not isinstance(c, dict) or not c.get("file"):
             continue
+        # Sound 1 is the song and drives the shot unless told otherwise; later
+        # sounds are references for MiniMax H3 unless placed on the shot.
+        role = c.get("role") if c.get("role") in ("lock", "guide", "ref") else ("lock" if not cards else "ref")
         cards.append({
+            "role": role,
+            "at": max(0, int(c.get("at") or 0)),
             "file": str(c["file"]),
             "start": max(0.0, float(c.get("start") or 0.0)),
             "duration": max(0.0, float(c.get("duration") or 0.0)),
@@ -181,6 +187,8 @@ def _parse_media(raw: str) -> dict:
             continue
         fps = c.get("fps", "target")
         clips.append({
+            "role": "guide" if c.get("role") == "guide" else "ref",
+            "at": max(0, int(c.get("at") or 0)),
             "file": str(c["file"]),
             "start": max(0.0, float(c.get("start") or 0.0)),
             "frames": max(1, int(c.get("frames") or 124)),
@@ -193,7 +201,14 @@ def _parse_media(raw: str) -> dict:
             "sound": "drop" if c.get("sound") == "drop" else "keep",
             "precision": "fp32" if c.get("precision") == "fp32" else "fp16",
         })
-    return {"audio": cards, "video": clips}
+    # Picture roles, in card order (index-aligned with image_paths). Missing = reference.
+    pics = []
+    for p in (data.get("pictures") or [])[:MAX_IMAGES]:
+        p = p if isinstance(p, dict) else {}
+        pics.append({"role": "key" if p.get("role") == "key" else "ref", "at": max(0, int(p.get("at") or 0))})
+    shot = data.get("shot") if isinstance(data.get("shot"), dict) else {}
+    return {"audio": cards, "video": clips, "pictures": pics,
+            "shot_frames": max(1, int(shot.get("frames") or 124))}
 
 
 def _clock(t: float) -> str:
@@ -443,38 +458,61 @@ class LunaAssetLoader:
             raise RuntimeError(
                 "[Luna Asset Loader] Nothing loaded. Press Upload and add pictures, clips or a song."
             )
+        shot_len = shot_frames(seconds, media["shot_frames"])
 
+        # --- load everything -------------------------------------------------
         audio, song, song_line = self._song(cards, seconds, shot)
-        videos, soundtracks, clip_lines = self._clips(clips, width, height)
-        if not paths:
-            # A song or clips on their own are a real use (the pictures come from
-            # elsewhere), so this is not an error — but the picture outputs stay
-            # empty, never black.
-            brief = " ".join(x for x in [" ".join(clip_lines), song_line] if x)
-            refs = {"images": [], "videos": videos, "video_audios": soundtracks, "audios": [],
-                    "brief": brief, "width": 0, "height": 0}
-            print(f"[Luna Asset Loader] no pictures; {brief}")
-            return {"ui": {"luna_asset_audio": [song] if song else []},
-                    "result": (None, 0, 0, brief, audio, refs, self._timeline(song, seconds))
-                    + (None,) * MAX_IMAGES}
+        decoded = self._clips(clips, width, height)
+        extra_sounds = self._sounds(cards)
+        frames, dims, originals = [], [], []
+        if paths:
+            states = _parse_state(asset_state, len(paths))
+            loaded = [_load(p, st) for p, st in zip(paths, states)]
+            frames = [f for f, _ in loaded]
+            originals = [o for _, o in loaded]
+            dims = [(int(f.shape[2]), int(f.shape[1])) for f in frames]  # (w, h) as delivered
 
-        states = _parse_state(asset_state, len(paths))
-        loaded = [_load(p, st) for p, st in zip(paths, states)]
-        frames = [f for f, _ in loaded]
-        originals = [o for _, o in loaded]
-        dims = [(int(f.shape[2]), int(f.shape[1])) for f in frames]  # (w, h) as delivered
+        # --- roles, tags, placements --------------------------------------------
+        pic = [media["pictures"][i] if i < len(media["pictures"]) else {"role": "ref", "at": 0}
+               for i in range(len(paths))]
+        tags = h3_tags([p["role"] for p in pic],
+                       [{"role": c["role"], "sound": d["sound"] is not None} for c, d in zip(clips, decoded)],
+                       [c["role"] for c in cards])
+        placed = [(f"Picture card {i + 1}", p["at"], 1) for i, p in enumerate(pic) if p["role"] == "key"]
+        placed += [(f"Clip V{k + 1} ({c['file']})", c["at"], int(d["batch"].shape[0]))
+                   for k, (c, d) in enumerate(zip(clips, decoded)) if c["role"] == "guide"]
+        placed += [(f"Sound A{j + 1} ({c['file']})", c["at"], 1)
+                   for j, c in enumerate(cards) if c["role"] in ("guide", "lock")]
+        errors = check_placements(shot_len, placed)
+        if errors:
+            raise RuntimeError("[Luna Asset Loader] " + " ".join(errors) + " Drag it on the shot timeline.")
 
-        lines = []
-        for i, ((w, h), (ow, oh)) in enumerate(zip(dims, originals)):
-            entry = f"<Picture {i + 1}> = {_describe_ar(w, h)}"
-            if (w, h) != (ow, oh):
-                # Say what it was as well as what it became. A prompt writer told
-                # only the resized number cannot tell a deliberate crop from an
-                # accident, and neither can you reading it back later.
-                entry += f" [resized from {ow}x{oh}]"
-            lines.append(entry)
-        brief = "Reference images, in order: " + "; ".join(lines) + "."
+        # --- references for MiniMax H3 ---------------------------------------------
+        ref_pics = [i for i, p in enumerate(pic) if p["role"] == "ref"]
+        ref_clips = [k for k, c in enumerate(clips) if c["role"] == "ref"]
+        ref_sounds = [j for j, c in enumerate(cards) if c["role"] == "ref"]
+        refs = {"images": [frames[i] for i in ref_pics],
+                "videos": [decoded[k]["batch"] for k in ref_clips],
+                "video_audios": [decoded[k]["sound"] for k in ref_clips],
+                "audios": [extra_sounds[j][0] for j in ref_sounds if extra_sounds.get(j)],
+                "width": dims[0][0] if dims else 0, "height": dims[0][1] if dims else 0}
 
+        # --- the brief ---------------------------------------------------------------
+        parts = []
+        if ref_pics:
+            lines = []
+            for i in ref_pics:
+                (w, h), (ow, oh) = dims[i], originals[i]
+                entry = f"{tags['pictures'][i]} = {_describe_ar(w, h)}"
+                if len(ref_pics) != len(paths):
+                    entry += f" (picture card {i + 1})"
+                if (w, h) != (ow, oh):
+                    # Say what it was as well as what it became. A prompt writer told
+                    # only the resized number cannot tell a deliberate crop from an
+                    # accident, and neither can you reading it back later.
+                    entry += f" [resized from {ow}x{oh}]"
+                lines.append(entry)
+            parts.append("Reference images, in order: " + "; ".join(lines) + ".")
         # FL2VA forces both frames to the exact generation size — the first with
         # crop disabled, so a mismatched aspect is STRETCHED, and the last with a
         # centre crop, so it is CUT. Neither errors, so say it here or nobody
@@ -483,36 +521,47 @@ class LunaAssetLoader:
         # up to ~1% by itself, so a tight absolute threshold would warn on every
         # snapped pair. 2% is above that noise floor and still catches a stretch
         # you would see.
-        r0 = dims[0][0] / dims[0][1] if len(dims) >= 1 else 0
-        r1 = dims[1][0] / dims[1][1] if len(dims) >= 2 else 0
-        if len(dims) >= 2 and abs(r0 - r1) / max(r0, r1) > 0.02:
-            warn = (f"WARNING: <Picture 1> and <Picture 2> have different aspect ratios "
-                    f"({_describe_ar(*dims[0])} vs {_describe_ar(*dims[1])}). Fine for "
-                    f"REF2VA, which keeps each aspect. In FL2VA the first frame gets "
-                    f"stretched and the last centre-cropped.")
-            print(f"[Luna Asset Loader] {warn}")
-            brief += " " + warn
+        if len(dims) >= 2:
+            r0, r1 = dims[0][0] / dims[0][1], dims[1][0] / dims[1][1]
+            if abs(r0 - r1) / max(r0, r1) > 0.02:
+                warn = (f"WARNING: picture cards 1 and 2 have different aspect ratios "
+                        f"({_describe_ar(*dims[0])} vs {_describe_ar(*dims[1])}). Fine for "
+                        f"REF2VA, which keeps each aspect. In FL2VA the first frame gets "
+                        f"stretched and the last centre-cropped.")
+                print(f"[Luna Asset Loader] {warn}")
+                parts.append(warn)
+        for k in ref_clips:
+            line = f"{tags['videos'][k]} = {decoded[k]['line']}"
+            if k in tags["video_audio"]:
+                line += f"; its sound is {tags['video_audio'][k]}"
+            elif clips[k]["sound"] == "keep":
+                line += "; it has no sound"
+            parts.append(line + ".")
+        for j in ref_sounds:
+            if extra_sounds.get(j):
+                parts.append(f"{tags['sounds'][j]} = {extra_sounds[j][1]}.")
+        if refs["audios"] and not refs["images"] and not refs["videos"]:
+            parts.append("WARNING: MiniMax H3 does not accept reference sounds without a reference "
+                         "picture or clip.")
+        on_shot = self._shot_lines(pic, clips, decoded, cards, song)
+        if on_shot:
+            parts.append(f"On the shot ({shot_len} frames, {shot_len / FPS:.2f} s): " + "; ".join(on_shot) + ".")
+        if song_line:
+            parts.append(song_line)
+        brief = " ".join(parts)
+        refs["brief"] = brief
+        print(f"[Luna Asset Loader] {brief}")
 
+        timeline = self._timeline(shot_len, pic, frames, clips, decoded, cards, extra_sounds, audio, song)
         numbered: list = [frames[i] if i < len(frames) else None for i in range(MAX_IMAGES)]
-        w, h = dims[0]
-        for extra in clip_lines + ([song_line] if song_line else []):
-            brief += " " + extra
-        refs = {"images": frames, "videos": videos, "video_audios": soundtracks, "audios": [],
-                "brief": brief, "width": w, "height": h}
-        print(f"[Luna Asset Loader] {len(frames)} image(s), showing {image_count} output(s); "
-              f"<Picture 1> = {w}x{h}" + (f"; {song_line}" if song_line else ""))
-        result = (_conform(frames), w, h, brief, audio, refs, self._timeline(song, seconds)) \
-            + tuple(numbered)
+        w, h = dims[0] if dims else (0, 0)
+        result = (_conform(frames) if frames else None, w, h, brief, audio, refs, timeline) + tuple(numbered)
         return {"ui": {"luna_asset_audio": [song] if song else []}, "result": result}
 
     @staticmethod
     def _clips(clips, width, height):
-        """Video cards -> (frame batches, soundtracks or None, brief lines).
-
-        MiniMax H3 numbers sounds by order of appearance: a clip's soundtrack is the
-        <Audio j> right before its <Video k>, so with sound kept on clips 1 and 3
-        they are <Audio 1> and <Audio 2>. The brief says which is which."""
-        videos, sounds, lines, audio_no = [], [], [], 0
+        """Video cards -> [{"batch", "sound", "info", "line"}], in card order."""
+        out = []
         box = (int(width), int(height)) if width and height and int(width) > 0 and int(height) > 0 else None
         for k, c in enumerate(clips, 1):
             path = folder_paths.get_annotated_filepath(c["file"])
@@ -535,28 +584,20 @@ class LunaAssetLoader:
             cost = clip_bytes(-(-frames // c["nth"]), ow, oh, c["precision"])
             if cost > MEMORY_CAP:
                 raise RuntimeError(
-                    f"[Luna Asset Loader] <Video {k}> ({c['file']}) would need {cost / 1024 ** 3:.1f} GB as "
+                    f"[Luna Asset Loader] Clip V{k} ({c['file']}) would need {cost / 1024 ** 3:.1f} GB as "
                     f"{frames} frames at {ow}x{oh} {c['precision']} — more than the {MEMORY_CAP / 1024 ** 3:.0f} GB "
                     f"this node allows. Shorten it, take every 2nd frame, use fp16 or a smaller size.")
             batch, got = decode_clip(path, c["start"], frames, fps, size, c["fit"], c["nth"], c["precision"],
                                      "h3" if c["count"] == "target" else "free")
-            videos.append(batch)
             sound = clip_soundtrack(path, got["start"], got["seconds"]) if c["sound"] == "keep" else None
-            sounds.append(sound)
-            line = (f"<Video {k}> = {got['name']} from {_clock(got['start'])}, {got['frames']} frames "
+            line = (f"{got['name']} from {_clock(got['start'])}, {got['frames']} frames "
                     f"({got['seconds']:.2f} s) at {got['fps']:g} fps, {got['width']}x{got['height']}")
             how = {"canvas": c["fit"] if box else "768 short edge", "edge": "768 short edge", "source": "as filmed"}[c["size"]]
             line += f" (from {got['source_size'][0]}x{got['source_size'][1]} at {got['source_fps']:g} fps, {how})"
             if got["short"]:
                 line += f"; the clip ran out, so {got['frames'] * got['nth']} of the {frames} frames asked for"
-            if sound is not None:
-                audio_no += 1
-                line += f"; its sound is <Audio {audio_no}>"
-            elif c["sound"] == "keep":
-                line += "; it has no sound"
-            lines.append(line + ".")
-            print(f"[Luna Asset Loader] {line}")
-        return videos, sounds, lines
+            out.append({"batch": batch, "sound": sound, "info": got, "line": line})
+        return out
 
     @staticmethod
     def _song(cards, seconds, shot=None):
@@ -607,18 +648,64 @@ class LunaAssetLoader:
         return audio, info, line
 
     @staticmethod
-    def _timeline(song, seconds):
-        """Placements on the shot, in frames at H3's 24 fps. v1 holds only the song."""
+    def _sounds(cards):
+        """Sound cards 2-3 that are references or guides -> {index: (AUDIO, description)}.
+        Cut to their window, never filled: a reference ends where it ends."""
+        out = {}
+        for j, c in enumerate(cards):
+            if j == 0 or c["role"] not in ("ref", "guide"):
+                continue
+            path = folder_paths.get_annotated_filepath(c["file"])
+            if not path or not os.path.isfile(path):
+                raise RuntimeError(f"[Luna Asset Loader] Sound not found in the input folder: {c['file']}")
+            clip, info = load_audio(path, c["start"], c["duration"])
+            out[j] = (clip, f"{info['name']} {_clock(info['start'])}-{_clock(info['start'] + info['seconds'])} "
+                            f"({info['seconds']:.2f} s)")
+        return out
+
+    @staticmethod
+    def _shot_lines(pic, clips, decoded, cards, song):
+        """What sits on the shot, in frame order, in words."""
+        rows = []
+        for i, p in enumerate(pic):
+            if p["role"] == "key":
+                rows.append((p["at"], f"frame {p['at']}: picture card {i + 1} as a keyframe"))
+        for k, (c, d) in enumerate(zip(clips, decoded)):
+            if c["role"] == "guide":
+                n = int(d["batch"].shape[0])
+                rows.append((c["at"], f"frames {c['at']}-{c['at'] + n - 1}: clip V{k + 1} ({d['info']['name']})"
+                                      + (" with its sound" if d["sound"] is not None else "")))
+        for j, c in enumerate(cards):
+            if c["role"] == "lock":
+                rows.append((c["at"], f"from frame {c['at']}: sound A{j + 1} locked — the picture follows it"))
+            elif c["role"] == "guide":
+                rows.append((c["at"], f"from frame {c['at']}: sound A{j + 1} as a guide"))
+        return [text for _, text in sorted(rows, key=lambda r: r[0])]
+
+    @staticmethod
+    def _timeline(shot_len, pic, frames, clips, decoded, cards, extra_sounds, audio, song):
+        """Everything placed on the shot, with its frames/sound attached, for a node
+        that applies it (guides, the locked song). Frames are at H3's 24 fps."""
         items = []
-        if song:
-            item = {"kind": "audio", "role": "lock", "at": 0, "file": song["name"],
-                    "start": round(song["start"], 4), "seconds": round(song["seconds"], 4)}
-            if song.get("shot") is not None:
-                item.update({"shot": song["shot"], "shots": song["shots"], "overlap_frames": song["overlap"]})
+        for i, p in enumerate(pic):
+            if p["role"] == "key":
+                items.append({"kind": "picture", "card": i + 1, "at": p["at"], "image": frames[i]})
+        for k, (c, d) in enumerate(zip(clips, decoded)):
+            if c["role"] == "guide":
+                items.append({"kind": "video", "card": k + 1, "at": c["at"], "file": d["info"]["name"],
+                              "frames": d["batch"], "audio": d["sound"]})
+        for j, c in enumerate(cards):
+            if c["role"] not in ("lock", "guide"):
+                continue
+            item = {"kind": "audio", "role": c["role"], "card": j + 1, "at": c["at"], "file": c["file"],
+                    "audio": audio if j == 0 else extra_sounds[j][0]}
+            if j == 0 and song:
+                item.update({"start": round(song["start"], 4), "seconds": round(song["seconds"], 4)})
+                if song.get("shot") is not None:
+                    item.update({"shot": song["shot"], "shots": song["shots"], "overlap_frames": song["overlap"]})
             items.append(item)
-        shot = float(seconds) if seconds is not None and float(seconds) > 0 else None
-        return {"version": 1, "fps": FPS,
-                "frames": int(round(shot * FPS)) if shot else None, "items": items}
+        items.sort(key=lambda it: it["at"])
+        return {"version": 2, "fps": FPS, "frames": shot_len, "items": items}
 
 
 def _input_file(name: str):

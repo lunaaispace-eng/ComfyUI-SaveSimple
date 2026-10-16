@@ -318,6 +318,28 @@ Clips reach MiniMax H3 through **`refs`** → Luna H3 Refs Out (`ref_video_0..2`
 `ref_video_audio_0..2`). A kept soundtrack is the `<Audio>` right before its
 `<Video>`, and `asset_brief` names which is which.
 
+## The shot timeline — references or on the shot
+
+Under the cards sits the **shot**: the video being generated, as long as the
+`seconds` input says (or set here with − +, in 17-frame steps). It has one lane
+per kind of asset, and every card has a **role**:
+
+| Card | Roles |
+| --- | --- |
+| picture | **Reference** (H3 sees it, named `<Picture n>`), or **Keyframe on the shot** at a frame |
+| clip | **Reference** (`<Video n>`), or **On the shot** from a frame — it must end inside the shot |
+| sound | **Lock to shot** (sound 1, the song: the picture follows it), **Guide at frame**, or **Reference** (`<Audio n>`) |
+
+Set the role in the card's editor (with *At frame*, *First*, *Last*), then drag
+the item along its lane. The **References** row shows the tag H3 will really use:
+H3 numbers only the references, in order, so with picture card 1 as a keyframe,
+card 2 is `<Picture 1>`. `asset_brief` spells out both the references and what
+sits where on the shot.
+
+`refs` carries only the references. `timeline` carries everything on the shot,
+with its frames, picture or sound attached, for a node that applies it. A
+placement that does not fit stops the run and says where it would fit.
+
 ## Per-image resize
 
 `mode` defaults to `off` — nothing is touched unless asked, which is what H3's
