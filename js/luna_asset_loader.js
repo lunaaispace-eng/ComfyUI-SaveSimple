@@ -1787,8 +1787,8 @@ function buildUI(node) {
                 `Sound A${j + 1} ${role === "lock" ? "locked — the picture follows it" : "as a guide"}, from frame ${at}`, selAudio === j);
         });
         if (!refs.children.length) refs.innerHTML = `<span class="luna-al-tlnote">none — everything is on the shot</span>`;
-        q(".luna-al-tlnote").textContent = `${targetOf(m).label}: ${targetOf(m).note} `
-            + "a sound runs from its frame to the end. H3 numbers only the references, in this order.";
+        q(".luna-al-tlnote").textContent = `${targetOf(m).label}: ${targetOf(m).note}`
+            + (targetOf(m).grid === "h3" ? " H3 numbers only the references, in this order." : "");
     }
 
     /* -------------------------------------------------------- song editor */
@@ -1962,9 +1962,12 @@ function buildUI(node) {
                 : (N ? `of ${N}` : "");
             win.classList.toggle("locked", ws.wired);
             if (T) {
-                const W = wave.getBoundingClientRect().width;
-                win.style.left = `${Math.min(a, T) / T * W}px`;
-                win.style.width = `${Math.max(3, Math.min(e, Math.max(0, T - a)) / T * W)}px`;
+                // Percent, never measured pixels: ComfyUI scales DOM widgets with the canvas
+                // zoom, so getBoundingClientRect() is SCREEN pixels while style.left is the
+                // node's own pixels — at any zoom but 100% the window drifted off the pink
+                // selection it marks (Peter's screenshots, 2026-10-16).
+                win.style.left = `${Math.min(a, T) / T * 100}%`;
+                win.style.width = `${Math.max(0.4, Math.min(e, Math.max(0, T - a)) / T * 100)}%`;
                 $(".tag").textContent = byShot ? `shot ${n} · ${e.toFixed(2)} s` : `${e.toFixed(2)} s`;
                 const cv = wave.querySelector("canvas");
                 drawWave(cv, info, 0, T, a, a + e);
@@ -2125,8 +2128,8 @@ function buildUI(node) {
                 if (t >= b || player.paused) { stopPlay(); return; }
                 const T = total(), W = wave.getBoundingClientRect().width, Z = zoom.getBoundingClientRect().width;
                 phW.style.display = phZ.style.display = "block";
-                phW.style.left = `${t / T * W}px`;
-                phZ.style.left = `${(t - (a - 1)) / (eff() + 2) * Z}px`;
+                phW.style.left = `${t / T * 100}%`;
+                phZ.style.left = `${(t - (a - 1)) / (eff() + 2) * 100}%`;
                 playRaf = requestAnimationFrame(tick);
             };
             playRaf = requestAnimationFrame(tick);
@@ -2223,7 +2226,7 @@ function buildUI(node) {
         ved.innerHTML = `
             <div class="luna-al-ahead"><b>&lt;Video ${idx + 1}&gt;</b><span class="nm"></span><span class="sp"></span><span class="meta">reading the clip…</span>
               <div class="luna-al-play" title="Play the clip window">▶</div></div>
-            <video class="luna-al-video" muted playsinline preload="metadata"></video>
+            <video class="luna-al-video" playsinline preload="metadata"></video>
             <div class="luna-al-zlbl"><span>The whole clip · drag the window to choose the part</span><span class="zr"></span></div>
             <div class="luna-al-strip"><div class="luna-al-win"><div class="h l"></div><div class="h r"></div><div class="tag"></div></div></div>
             <div class="luna-al-ruler"></div>
