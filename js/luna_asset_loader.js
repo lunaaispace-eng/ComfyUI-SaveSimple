@@ -112,6 +112,49 @@ const CSS = `
                border:1px solid var(--luna-border); color:var(--luna-text); font-size:10px; }
 .luna-al-io { opacity:.75; font-size:10px; }
 .luna-al-io b { color:var(--luna-accent); font-weight:600; }
+
+/* Sound cards and the song editor (v3). Pink marks sound everywhere, the same
+   colour ComfyUI gives AUDIO sockets, so a sound card cannot be mistaken for a
+   picture. Still no backticks in here. */
+.luna-al-card.snd { cursor:pointer; }
+.luna-al-snd { display:block; width:100%; aspect-ratio:1/1; background:var(--luna-bg); }
+.luna-al-pic.snd { background:#e07bb4; }
+.luna-al-aed { display:flex; flex-direction:column; gap:6px; border:1px solid var(--luna-border);
+               border-radius:8px; background:var(--luna-bg); padding:7px; }
+.luna-al-ahead { display:flex; align-items:center; gap:8px; color:var(--luna-muted); font-size:10.5px; }
+.luna-al-ahead b { color:#e07bb4; font-size:11px; }
+.luna-al-ahead .sp { flex:1 1 auto; }
+.luna-al-play { width:26px; height:20px; border-radius:5px; border:1px solid var(--luna-border);
+                background:var(--luna-panel); color:var(--luna-text); text-align:center; line-height:18px; cursor:pointer; }
+.luna-al-play:hover { border-color:var(--luna-accent); color:var(--luna-accent); }
+.luna-al-wave { position:relative; height:64px; border-radius:6px; background:#101116; overflow:hidden; cursor:crosshair; }
+.luna-al-wave canvas, .luna-al-zoom canvas { position:absolute; inset:0; width:100%; height:100%; }
+.luna-al-win { position:absolute; top:0; bottom:0; background:#e0a45826; border-left:2px solid var(--luna-accent);
+               border-right:2px solid var(--luna-accent); cursor:grab; box-sizing:border-box; }
+.luna-al-win .h { position:absolute; top:0; bottom:0; width:10px; cursor:ew-resize; }
+.luna-al-win .h.l { left:-6px; } .luna-al-win .h.r { right:-6px; }
+.luna-al-win.locked .h { cursor:not-allowed; }
+.luna-al-win .tag { position:absolute; top:2px; left:4px; font-size:10px; color:var(--luna-accent);
+                    white-space:nowrap; text-shadow:0 1px 2px #000; pointer-events:none; }
+.luna-al-ph { position:absolute; top:0; bottom:0; width:2px; background:#fff; display:none; pointer-events:none; }
+.luna-al-ruler { position:relative; height:12px; font-size:9.5px; color:var(--luna-muted); }
+.luna-al-ruler span { position:absolute; transform:translateX(-50%); white-space:nowrap; }
+.luna-al-zoom { position:relative; height:40px; border-radius:6px; background:#101116; overflow:hidden; cursor:ew-resize; }
+.luna-al-zlbl { display:flex; justify-content:space-between; font-size:10px; color:var(--luna-muted); }
+.luna-al-nums { display:grid; grid-template-columns:auto auto auto 1fr; gap:5px 7px; align-items:center; font-size:10.5px; }
+.luna-al-nums .l { color:var(--luna-muted); }
+.luna-al-nf { display:flex; align-items:center; gap:3px; }
+.luna-al-nf input { width:74px; padding:3px 5px; border-radius:5px; background:#0d0e12; border:1px solid var(--luna-border);
+                    color:var(--luna-text); font:11px ui-monospace, Consolas, monospace; text-align:center; }
+.luna-al-nf input:focus { outline:none; border-color:var(--luna-accent); }
+.luna-al-nf input.lockd { color:var(--luna-accent); border-color:#e0a45855; background:#e0a45810; }
+.luna-al-nud { width:20px; height:20px; border-radius:4px; border:1px solid var(--luna-border); background:var(--luna-panel);
+               color:var(--luna-muted); text-align:center; line-height:18px; cursor:pointer; user-select:none; }
+.luna-al-nud:hover { color:var(--luna-accent); border-color:var(--luna-accent); }
+.luna-al-lock { font-size:10px; color:var(--luna-accent); white-space:nowrap; }
+.luna-al-astat { font-size:10px; color:var(--luna-muted); border-top:1px solid var(--luna-border); padding-top:5px; line-height:1.45; }
+.luna-al-astat b { color:var(--luna-text); font-weight:600; }
+.luna-al-astat .w { color:#f0a49a; }
 `;
 
 function injectCSS() {
@@ -205,6 +248,113 @@ function syncAccent(node, rootEl) {
 
 const viewURL = (name) =>
     `/view?filename=${encodeURIComponent(name)}&type=input&subfolder=&rand=${Math.random()}`;
+// Stable URL for sound files: the waveform decode and the player share the
+// browser's cache instead of downloading a song twice.
+const soundURL = (name) => `/view?filename=${encodeURIComponent(name)}&type=input&subfolder=`;
+
+/* ------------------------------------------------------------- sound cards */
+
+const MEDIA_WIDGET = "media_state";
+const MAX_SOUNDS = 3;
+const H3_FPS = 24;
+const AUDIO_EXT = /\.(wav|mp3|flac|ogg|opus|m4a|aac|wma|aiff?)$/i;
+const isAudioFile = (f) => (f.type || "").startsWith("audio/") || AUDIO_EXT.test(f.name || "");
+
+function readMedia(node) {
+    try {
+        const m = JSON.parse(String(widget(node, MEDIA_WIDGET)?.value || "") || "{}");
+        return { audio: Array.isArray(m.audio) ? m.audio.filter((c) => c && c.file) : [] };
+    } catch { return { audio: [] }; }
+}
+
+function writeMedia(node, m) {
+    const w = widget(node, MEDIA_WIDGET);
+    if (!w) return;
+    w.value = m.audio.length ? JSON.stringify({ audio: m.audio }) : "";
+    w.callback?.(w.value);
+    node.graph?.setDirtyCanvas(true, true);
+}
+
+// MiniMax H3 shot lengths: 5, 22, 39 … frames (17k+5) at 24 fps, nearest first.
+function snapH3Seconds(sec) {
+    const n = Math.max(5, Math.round(sec * H3_FPS));
+    const up = n + ((5 - (n % 17)) % 17 + 17) % 17, down = up - 17;
+    return (down >= 5 && n - down < up - n ? down : up) / H3_FPS;
+}
+
+const clock = (t) => {
+    t = Math.max(0, t || 0);
+    const m = Math.floor(t / 60), s = t - m * 60;
+    return `${m}:${s.toFixed(2).padStart(5, "0")}`;
+};
+const parseClock = (txt) => {
+    const s = String(txt).trim().replace(",", ".");
+    const m = s.match(/^(\d+):(\d+(?:\.\d+)?)$/);
+    const v = m ? Number(m[1]) * 60 + Number(m[2]) : Number(s.replace(/\s*s$/, ""));
+    return Number.isFinite(v) ? v : null;
+};
+
+// Waveform peaks, 100 per second, decoded once per file in the browser — the
+// file is already in the input folder, so nothing is decoded on the server just
+// to draw a picture of it (the same split Pixaroma's Load Audio makes).
+const PEAKS_PER_S = 100;
+const _peaks = new Map();     // file -> Promise<{peaks, duration, sampleRate, channels}>
+function loadPeaks(file) {
+    if (_peaks.has(file)) return _peaks.get(file);
+    const p = (async () => {
+        const buf = await (await fetch(soundURL(file))).arrayBuffer();
+        const ctx = new OfflineAudioContext(1, 1, 44100);
+        const ab = await ctx.decodeAudioData(buf);
+        const n = Math.max(1, Math.ceil(ab.duration * PEAKS_PER_S));
+        const per = ab.length / n, peaks = new Float32Array(n);
+        for (let c = 0; c < ab.numberOfChannels; c++) {
+            const d = ab.getChannelData(c);
+            for (let i = 0; i < n; i++) {
+                let mx = peaks[i];
+                const a = Math.floor(i * per), b = Math.min(d.length, Math.floor((i + 1) * per));
+                for (let j = a; j < b; j++) { const v = d[j] < 0 ? -d[j] : d[j]; if (v > mx) mx = v; }
+                peaks[i] = mx;
+            }
+        }
+        return { peaks, duration: ab.duration, sampleRate: ab.sampleRate, channels: ab.numberOfChannels };
+    })();
+    p.catch(() => _peaks.delete(file));
+    _peaks.set(file, p);
+    return p;
+}
+
+// Draw [t0, t1] of a song; samples inside [a, b] in the selection colour.
+function drawWave(cv, info, t0, t1, a, b, opts = {}) {
+    if (!cv?.isConnected || !info) return;
+    const r = cv.getBoundingClientRect(), dpr = window.devicePixelRatio || 1;
+    if (!r.width || !r.height) return;
+    cv.width = Math.round(r.width * dpr); cv.height = Math.round(r.height * dpr);
+    const g = cv.getContext("2d");
+    g.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const W = r.width, H = r.height, mid = H / 2, span = Math.max(1e-6, t1 - t0);
+    if (opts.grid) {
+        g.strokeStyle = "#2a2c35";
+        for (let s = Math.ceil(t0 * 2) / 2; s < t1; s += 0.5) {
+            const x = (s - t0) / span * W;
+            g.beginPath(); g.moveTo(x, 0); g.lineTo(x, H); g.stroke();
+        }
+    }
+    const { peaks } = info, step = opts.step || 2;
+    for (let x = 0; x < W; x += step) {
+        const ta = t0 + x / W * span, tb = t0 + (x + step) / W * span;
+        let mx = 0;
+        for (let i = Math.max(0, Math.floor(ta * PEAKS_PER_S)); i <= Math.min(peaks.length - 1, Math.floor(tb * PEAKS_PER_S)); i++)
+            if (peaks[i] > mx) mx = peaks[i];
+        const tm = (ta + tb) / 2, h = Math.max(1, mx * (H / 2 - 2));
+        g.fillStyle = tm >= a && tm <= b ? (opts.color || "#e07bb4") : "#5d616e";
+        g.fillRect(x, mid - h, Math.max(1, step - 0.6), h * 2);
+    }
+}
+
+// The last run's song report, per node. Module memory rather than node.properties:
+// properties are compared by the change tracker, and writing them on every run
+// would mark the workflow modified (the lesson LLM Prompt's face learned).
+const _lastSong = new Map();
 
 /* ------------------------------------------------------- per-image resize state */
 
@@ -319,13 +469,50 @@ async function uploadFiles(files) {
 
 /* --------------------------------------------------------------- outputs */
 
-// The four fixed outputs (images, width, height, asset_brief) occupy slots 0-3 and
-// are never touched. Only the trailing image_N slots grow and shrink.
+// The seven fixed outputs (images, width, height, asset_brief, audio, refs,
+// timeline) occupy slots 0-6 and are never touched. Only the trailing image_N
+// slots grow and shrink.
 //
 // `slot.hidden` does NOT work: setting it leaves the flag on the object but the
 // frontend (1.48.x) still draws every output. Verified in the browser, which is
 // why this adds and removes real slots instead.
-const FIXED = 4;
+const FIXED = 7;
+const NEW_OUTS = [["audio", "AUDIO"], ["refs", "LUNA_H3_REFS"], ["timeline", "LUNA_TIMELINE"]];
+
+// Workflows saved before audio/refs/timeline existed have image_1 at slot 4.
+// Frontend 1.55.17 overwrites a saved node's output names BY POSITION from the
+// current definition and keeps every link on its slot number, so left alone an
+// old image_1 wire lands on `audio` without a word (seen in the S0 spike,
+// 2026-10-16). onConfigure is too late for that; this rewrites the raw workflow
+// JSON before the graph is configured: the three new slots go in at 4 and every
+// link leaving slot 4 or higher of an old Asset Loader moves up by three. Root
+// graph and subgraph definitions alike. A migrated save has "audio" at slot 4, so
+// it is never moved twice.
+function migrateWorkflowJSON(data) {
+    const moved = [];
+    const fixGraph = (g, where) => {
+        if (!Array.isArray(g?.nodes)) return;
+        const old = new Set();
+        for (const n of g.nodes) {
+            if (n?.type !== NODE || !Array.isArray(n.outputs) || n.outputs[4]?.name !== "image_1") continue;
+            old.add(n.id);
+            n.outputs.splice(4, 0, ...NEW_OUTS.map(([name, type]) => ({ name, localized_name: name, type, links: null })));
+        }
+        if (!old.size) return;
+        for (const l of g.links || []) {
+            // [id, origin_id, origin_slot, target_id, target_slot, type] in the root
+            // graph; {id, origin_id, origin_slot, ...} inside subgraph definitions.
+            const arr = Array.isArray(l);
+            const oid = arr ? l[1] : l?.origin_id, os = arr ? l[2] : l?.origin_slot;
+            if (!old.has(oid) || !(os >= 4)) continue;
+            if (arr) l[2] = os + NEW_OUTS.length; else l.origin_slot = os + NEW_OUTS.length;
+            moved.push(`${where} link ${arr ? l[0] : l.id}: slot ${os} -> ${os + NEW_OUTS.length}`);
+        }
+    };
+    fixGraph(data, "root");
+    for (const sg of data?.definitions?.subgraphs || []) fixGraph(sg, `subgraph ${sg.id}`);
+    return moved;
+}
 
 // Returns what happened: { target, shown, blocked }. `blocked` is the 1-based
 // image_N that stopped a shrink because it is wired, 0 if nothing stopped it.
@@ -420,11 +607,15 @@ function countCtlRects(node, ctx) {
     if (node.size[0] >= CTL.minWidthForLabel) {
         // Measuring a STRING is fine; measuring the LAYOUT is what is forbidden.
         const w = ctx ? ctx.measureText(CTL.label).width : CTL.label.length * 6.2;
-        label = [x, CTL.top, w, CTL.boxH];
+        label = [x, 0, w, CTL.boxH];   // y is set below, with the rest of the row
         x += w + CTL.labelGap;
     }
-    const y = CTL.top;
+    // Input sockets (`seconds`, v3) occupy the left column's top rows; the stepper
+    // sits below them. Counted from the inputs, never measured.
+    const sockets = (node.inputs || []).filter((i) => !i.widget).length;
+    const y = CTL.top + (sockets ? sockets * (window.LiteGraph?.NODE_SLOT_HEIGHT || 20) + 4 : 0);
     const r = (rx, rw) => [rx, y, rw, CTL.boxH];
+    if (label) label[1] = y;
     return {
         label,
         minus: r(x, CTL.stepW),
@@ -511,14 +702,21 @@ function buildUI(node) {
 
     const panel = document.createElement("div");
     panel.className = "luna-al-panel";
-    root.append(bar, cards, preview, panel);
+    // The song editor takes the preview's place while a sound card is selected.
+    const aed = document.createElement("div");
+    aed.className = "luna-al-aed";
+    aed.style.display = "none";
+    // Drags and typing in here belong to the editor, never to the canvas.
+    for (const ev of ["pointerdown", "keydown", "wheel"]) aed.addEventListener(ev, (e) => e.stopPropagation());
+    root.append(bar, cards, preview, panel, aed);
 
     let selected = 0;                 // which card the resize panel edits
+    let selAudio = -1;                // which sound card the song editor edits; -1 = a picture is selected
     const natural = new Map();        // filename -> [w, h], filled as thumbs decode
 
     const picker = document.createElement("input");
     picker.type = "file";
-    picker.accept = "image/*";
+    picker.accept = "image/*,audio/*,.mp3,.wav,.flac,.ogg,.opus,.m4a,.aac";
     picker.multiple = true;
     picker.style.display = "none";
     root.appendChild(picker);
@@ -533,7 +731,11 @@ function buildUI(node) {
     };
 
     mkBtn("Upload", "", () => picker.click());
-    mkBtn("Clear", "danger", () => { writePaths(node, []); syncCount(node, 0); render(); });
+    mkBtn("Clear", "danger", () => {
+        writePaths(node, []); syncCount(node, 0);
+        writeMedia(node, { audio: [] }); selAudio = -1;
+        render();
+    });
 
     // image_paths and asset_state are hidden once the cards own them — two
     // multiline boxes were taking most of the node. They stay reachable, because
@@ -544,7 +746,7 @@ function buildUI(node) {
     // brings all three back, so there is still a way in if the stepper misbehaves.
     let fieldsShown = false;
     const setFieldsVisible = (show) => {
-        for (const name of [PATHS_WIDGET, COUNT_WIDGET, "asset_state"]) {
+        for (const name of [PATHS_WIDGET, COUNT_WIDGET, "asset_state", MEDIA_WIDGET]) {
             const w = widget(node, name);
             if (!w) continue;
             // `w.hidden` is the flag that actually works. Measured in 1.48.x by
@@ -599,13 +801,27 @@ function buildUI(node) {
         const files = Array.from(picker.files || []);
         picker.value = "";
         if (!files.length) return;
-        const names = await uploadFiles(files);
-        if (!names.length) return;
-        const next = readPaths(node).concat(names).slice(0, MAX);
-        writePaths(node, next);
-        // The card list drives the socket count, both ways. The arrows still
-        // override it by hand; the override holds until the list changes again.
-        syncCount(node, next.length);
+        // One button for everything: sound files become sound cards, the rest pictures.
+        const sounds = files.filter(isAudioFile), pictures = files.filter((f) => !isAudioFile(f));
+        if (sounds.length) {
+            const m = readMedia(node);
+            const room = MAX_SOUNDS - m.audio.length;
+            const names = await uploadFiles(sounds.slice(0, Math.max(0, room)));
+            for (const file of names) m.audio.push({ file, start: 0, duration: 0, fill: "silence" });
+            if (names.length) { writeMedia(node, m); selAudio = m.audio.length - 1; }
+            if (sounds.length > room) notice(`Room for ${MAX_SOUNDS} sounds; ${sounds.length - Math.max(0, room)} not added.`);
+        }
+        if (pictures.length) {
+            const names = await uploadFiles(pictures);
+            if (names.length) {
+                const next = readPaths(node).concat(names).slice(0, MAX);
+                writePaths(node, next);
+                // The card list drives the socket count, both ways. The arrows still
+                // override it by hand; the override holds until the list changes again.
+                syncCount(node, next.length);
+                if (!sounds.length) selAudio = -1;
+            }
+        }
         render();
     };
 
@@ -613,16 +829,18 @@ function buildUI(node) {
 
     function render() {
         const paths = readPaths(node);
+        const media = readMedia(node);
+        if (selAudio >= media.audio.length) selAudio = media.audio.length - 1;
         cards.replaceChildren();
-        counter.textContent = `${paths.length} / ${MAX}`;
+        counter.textContent = `${paths.length} / ${MAX}` + (media.audio.length ? ` · ${media.audio.length} sound` : "");
 
         // No early return on the empty list. It used to return here, which skipped
         // renderPreview/renderPanel — both handle "nothing loaded" correctly, they
         // just never ran, so the last selected image stayed on screen after Clear.
-        if (!paths.length) {
+        if (!paths.length && !media.audio.length) {
             const e = document.createElement("div");
             e.className = "luna-al-empty";
-            e.textContent = "No images. Press Upload, or type file names in image_paths below.";
+            e.textContent = "Nothing loaded. Press Upload for pictures or a song, or type file names in image_paths below.";
             cards.appendChild(e);
         }
         if (paths.length > MAX) {
@@ -634,12 +852,12 @@ function buildUI(node) {
 
         paths.forEach((name, i) => {
             const card = document.createElement("div");
-            card.className = "luna-al-card" + (i === selected ? " sel" : "");
+            card.className = "luna-al-card" + (i === selected && selAudio < 0 ? " sel" : "");
             card.draggable = true;
             // Selecting is what makes a nine-image node editable: the resize panel
             // below edits whichever card is selected, so REF2VA references can stay
             // untouched while slots 1 and 2 get conformed.
-            card.onclick = () => { selected = i; render(); };
+            card.onclick = () => { selected = i; selAudio = -1; render(); };
 
             const img = document.createElement("img");
             img.className = "luna-al-thumb";
@@ -708,9 +926,53 @@ function buildUI(node) {
             cards.appendChild(card);
         });
 
+        // Sound cards after the pictures. Not draggable: they are numbered on their
+        // own (A1 is the song), and pictures never trade places with them.
+        media.audio.forEach((c, i) => {
+            const card = document.createElement("div");
+            card.className = "luna-al-card snd" + (i === selAudio ? " sel" : "");
+            card.title = `Sound ${i + 1}${i === 0 ? " — the song on the audio output" : ""}\n${c.file}`;
+            card.onclick = () => { selAudio = i; render(); };
+            const cv = document.createElement("canvas");
+            cv.className = "luna-al-snd";
+            const pic = document.createElement("div");
+            pic.className = "luna-al-pic snd";
+            pic.textContent = `A${i + 1}`;
+            const cap = document.createElement("div");
+            cap.className = "luna-al-cap";
+            const dim = document.createElement("div");
+            dim.className = "luna-al-dim";
+            dim.textContent = "reading…";
+            const nm = document.createElement("div");
+            nm.className = "luna-al-name";
+            nm.textContent = c.file;
+            cap.append(dim, nm);
+            const x = document.createElement("div");
+            x.className = "luna-al-x";
+            x.textContent = "✕";
+            x.title = "Remove";
+            x.onclick = (ev) => {
+                ev.stopPropagation();
+                const m = readMedia(node);
+                m.audio.splice(i, 1);
+                writeMedia(node, m);
+                if (selAudio >= m.audio.length) selAudio = m.audio.length - 1;
+                if (!m.audio.length) selAudio = -1;
+                render();
+            };
+            card.append(cv, pic, x, cap);
+            cards.appendChild(card);
+            loadPeaks(c.file).then((info) => {
+                dim.textContent = `${clock(info.duration).replace(/\.\d+$/, "")} · ${(info.sampleRate / 1000).toFixed(1)} kHz`;
+                const dur = c.duration > 0 ? c.duration : info.duration - c.start;
+                setTimeout(() => drawWave(cv, info, 0, info.duration, c.start, c.start + dur, { step: 2 }), 0);
+            }).catch(() => { dim.textContent = "cannot be read"; });
+        });
+
         syncAccent(node, root);
         renderPreview();
         renderPanel();
+        renderAudio();
 
         // The widget's getHeight depends on how many cards there are, so a redraw
         // has to follow any change to the list or the node keeps its old height.
@@ -719,6 +981,7 @@ function buildUI(node) {
 
     function renderPreview() {
         const paths = readPaths(node);
+        if (selAudio >= 0) { preview.style.display = "none"; return; }
         if (!paths.length) {
             // Drop the picture as well as hiding the box: leaving the src set kept
             // the removed image decoded, and the dataset guard below would then
@@ -750,6 +1013,8 @@ function buildUI(node) {
 
     function renderPanel() {
         panel.replaceChildren();
+        panel.style.display = selAudio >= 0 ? "none" : "";
+        if (selAudio >= 0) return;
         const paths = readPaths(node);
         if (!paths.length) return;
         if (selected >= paths.length) selected = 0;
@@ -852,13 +1117,256 @@ function buildUI(node) {
         r6.append(all, reset);
     }
 
-    return { root, render, selectCard: (i) => { selected = i; renderPanel(); }, natural };
+    /* -------------------------------------------------------- song editor */
+
+    // What the `seconds` input says, when it is wired. The frontend can read a
+    // plain number widget on the node at the other end (a Float primitive, a
+    // canvas node's seconds); anything computed is only known after a run, so the
+    // last run's value stands in, and the editor says which it is showing.
+    function wiredSeconds() {
+        const inp = node.inputs?.find((x) => x.name === "seconds");
+        if (!inp || inp.link == null) return { wired: false, value: null, from: "" };
+        let value = null, from = "the wire";
+        try {
+            const g = node.graph;
+            const l = g.getLink?.(inp.link) ?? g.links?.get?.(inp.link) ?? g.links?.[inp.link];
+            const src = l && g.getNodeById(l.origin_id);
+            const out = src?.outputs?.[l.origin_slot];
+            from = src?.title || from;
+            const w = src?.widgets?.find((x) => x.name === out?.name) || src?.widgets?.find((x) => x.name === "value");
+            if (w && Number.isFinite(Number(w.value)) && Number(w.value) > 0) value = Number(w.value);
+        } catch { /* graph mid-change: fall back to the last run */ }
+        if (value == null) {
+            const last = _lastSong.get(node.id);
+            if (last?.wired && last.seconds > 0) { value = last.seconds; from += ", last run"; }
+        }
+        return { wired: true, value, from };
+    }
+
+    let player = null, playRaf = 0;
+    function stopPlay() {
+        cancelAnimationFrame(playRaf);
+        player?.pause();
+        aed.querySelectorAll(".luna-al-ph").forEach((p) => { p.style.display = "none"; });
+        const b = aed.querySelector(".luna-al-play");
+        if (b) b.textContent = "▶";
+    }
+
+    function renderAudio() {
+        stopPlay();
+        const media = readMedia(node);
+        if (selAudio < 0 || !media.audio[selAudio]) {
+            aed.style.display = "none";
+            aed.replaceChildren();
+            return;
+        }
+        aed.style.display = "";
+        const idx = selAudio, card = { fill: "silence", snap: "off", ...media.audio[idx] };
+        let start = Number(card.start) || 0, dur = Number(card.duration) || 0, info = null;
+        const ws = wiredSeconds();
+
+        aed.innerHTML = `
+            <div class="luna-al-ahead"><b>A${idx + 1}</b><span class="nm"></span><span class="sp"></span><span class="meta">reading the song…</span>
+              <div class="luna-al-play" title="Play the window">▶</div></div>
+            <div class="luna-al-wave"><canvas></canvas><div class="luna-al-win"><div class="h l"></div><div class="h r"></div><div class="tag"></div></div><div class="luna-al-ph"></div></div>
+            <div class="luna-al-ruler"></div>
+            <div class="luna-al-zlbl"><span>Zoom on the window (± 1 s) · drag to fine-tune the start</span><span class="zr"></span></div>
+            <div class="luna-al-zoom"><canvas></canvas><div class="luna-al-ph"></div></div>
+            <div class="luna-al-nums">
+              <span class="l">Start</span><div class="luna-al-nf"><span class="luna-al-nud" data-n="-1" title="0.1 s earlier">◀</span><input class="st"><span class="luna-al-nud" data-n="1" title="0.1 s later">▶</span></div>
+              <span class="l">Duration</span><div class="luna-al-nf"><input class="du"><span class="luna-al-lock"></span></div>
+              <span class="l">End</span><div class="luna-al-nf"><input class="en" readonly tabindex="-1"></div><span></span><span></span>
+            </div>
+            <div class="luna-al-row"><div class="luna-al-lbl">Song ends</div><div class="luna-al-seg fill"></div></div>
+            <div class="luna-al-row snaprow"><div class="luna-al-lbl">Snap</div><div class="luna-al-seg snap"></div></div>
+            <div class="luna-al-astat"></div>`;
+        const $ = (s) => aed.querySelector(s);
+        $(".nm").textContent = card.file;
+        const wave = $(".luna-al-wave"), win = $(".luna-al-win"), zoom = $(".luna-al-zoom");
+        const [phW, phZ] = aed.querySelectorAll(".luna-al-ph");
+        const iSt = $(".st"), iDu = $(".du"), iEn = $(".en");
+
+        const total = () => info?.duration || 0;
+        // dur 0 means "to the end of the file"; a wired seconds input wins over both.
+        const eff = () => (ws.wired && ws.value > 0) ? ws.value : (dur > 0 ? dur : Math.max(0, total() - start));
+        const clampStart = (t) => Math.max(0, Math.min(t, Math.max(0, total() - Math.min(eff(), total()))));
+
+        const seg = (host, opts, cur, pick) => {
+            host.replaceChildren();
+            for (const [val, text] of opts) {
+                const o = document.createElement("div");
+                o.className = "luna-al-opt" + (val === cur ? " on" : "");
+                o.textContent = text;
+                o.onclick = () => pick(val);
+                host.appendChild(o);
+            }
+        };
+        seg($(".fill"), [["silence", "Silence"], ["loop", "Loop the song"]], card.fill, (v) => commit({ fill: v }));
+        seg($(".snap"), [["off", "Off"], ["h3", "H3 shot grid (17k+5 at 24 fps)"]], card.snap, (v) => {
+            commit({ snap: v, duration: v === "h3" && dur > 0 ? snapH3Seconds(dur) : dur });
+        });
+        $(".snaprow").style.display = ws.wired ? "none" : "";
+
+        function commit(patch = {}) {
+            const m = readMedia(node);
+            if (!m.audio[idx]) return;
+            m.audio[idx] = { ...m.audio[idx], start: +start.toFixed(3), duration: +dur.toFixed(3), ...patch };
+            writeMedia(node, m);
+            render();
+        }
+
+        function draw() {
+            const e = eff(), T = total();
+            iSt.value = clock(start);
+            iDu.value = `${e.toFixed(2)} s`;
+            iEn.value = clock(start + e);
+            iDu.readOnly = ws.wired;
+            iDu.classList.toggle("lockd", ws.wired);
+            $(".luna-al-lock").textContent = ws.wired
+                ? (ws.value > 0 ? `🔒 ${Math.round(e * H3_FPS)} frames · ${ws.from}` : `🔒 set by ${ws.from} — known after a run`)
+                : `${Math.round(e * H3_FPS)} frames at 24 fps`;
+            win.classList.toggle("locked", ws.wired);
+            if (T) {
+                const W = wave.getBoundingClientRect().width;
+                win.style.left = `${Math.min(start, T) / T * W}px`;
+                win.style.width = `${Math.max(3, Math.min(e, Math.max(0, T - start)) / T * W)}px`;
+                $(".tag").textContent = `${e.toFixed(2)} s`;
+                drawWave(wave.querySelector("canvas"), info, 0, T, start, start + e);
+                const z0 = start - 1, z1 = start + e + 1;
+                drawWave(zoom.querySelector("canvas"), info, z0, z1, start, start + e, { grid: true, step: 1 });
+                $(".zr").textContent = `${clock(Math.max(0, z0))} – ${clock(z1)}`;
+            }
+            const short = T ? start + e - T : 0;
+            const last = _lastSong.get(node.id);
+            let msg = ws.wired
+                ? `The duration comes from the <b>seconds</b> input, so the song always matches the shot. Move the window or type a start.`
+                : `Drag the window to choose the part; drag its edges or type Start and Duration.`;
+            if (short > 0.005)
+                msg += `<br><span class="w">The song ends ${short.toFixed(2)} s before the window does; that part will be ${card.fill === "loop" ? "the song again from its start" : "silence"}.</span>`;
+            if (last && last.name === card.file)
+                msg += `<br>Last run: ${clock(last.start)}–${clock(last.start + last.seconds)}, ${last.seconds.toFixed(2)} s${last.filled > 0.0005 ? `, ${last.filled.toFixed(2)} s filled` : ""}.`;
+            $(".luna-al-astat").innerHTML = msg;
+        }
+
+        const ruler = () => {
+            const T = total(), r = $(".luna-al-ruler");
+            r.replaceChildren();
+            if (!T) return;
+            const step = T > 240 ? 60 : T > 90 ? 30 : T > 30 ? 10 : 5;
+            for (let t = 0; t <= T; t += step) {
+                const s = document.createElement("span");
+                s.style.left = `${t / T * 100}%`;
+                s.textContent = clock(t).replace(/\.\d+$/, "");
+                r.appendChild(s);
+            }
+        };
+
+        loadPeaks(card.file).then((p) => {
+            if (!aed.isConnected || aed.contains(win) === false) return;
+            info = p;
+            // The stored start is NOT clamped here: Python uses it as stored, so the
+            // window is drawn where it really is and the status says if the song runs
+            // out. Only a user's move is kept inside the song.
+            $(".meta").textContent = `${clock(p.duration)} · ${(p.sampleRate / 1000).toFixed(1)} kHz · ${p.channels === 1 ? "mono" : p.channels === 2 ? "stereo" : p.channels + " ch"}`;
+            ruler();
+            setTimeout(draw, 0);     // not rAF: a background tab never runs it
+        }).catch(() => { $(".meta").textContent = "this file cannot be read by the browser"; });
+        draw();
+
+        // Window: the body moves it, the edges resize it (not while seconds is wired).
+        let drag = null;
+        win.addEventListener("pointerdown", (e) => {
+            if (!info) return;
+            const edge = e.target.classList.contains("h") ? (e.target.classList.contains("l") ? "l" : "r") : "m";
+            if (edge !== "m" && ws.wired) { notice("The duration comes from the seconds input."); return; }
+            drag = { edge, x: e.clientX, s: start, d: eff() };
+            win.setPointerCapture(e.pointerId);
+            e.preventDefault();
+        });
+        win.addEventListener("pointermove", (e) => {
+            if (!drag) return;
+            const T = total(), dt = (e.clientX - drag.x) / wave.getBoundingClientRect().width * T;
+            if (drag.edge === "m") start = clampStart(drag.s + dt);
+            else if (drag.edge === "l") {
+                start = Math.max(0, Math.min(drag.s + drag.d - 0.1, drag.s + dt));
+                dur = drag.s + drag.d - start;
+            } else dur = Math.max(0.1, Math.min(T - drag.s, drag.d + dt));
+            draw();
+        });
+        const end = () => {
+            if (!drag) return;
+            const resized = drag.edge !== "m";
+            drag = null;
+            if (resized && card.snap === "h3") dur = snapH3Seconds(dur);
+            commit();
+        };
+        win.addEventListener("pointerup", end);
+        win.addEventListener("pointercancel", end);
+        // A click on the song outside the window centres the window there.
+        wave.addEventListener("pointerdown", (e) => {
+            if (!info || win.contains(e.target)) return;
+            const r = wave.getBoundingClientRect();
+            start = clampStart((e.clientX - r.left) / r.width * total() - eff() / 2);
+            commit();
+        });
+        // The zoom strip pans the start finely: the song moves with the hand.
+        let zd = null;
+        zoom.addEventListener("pointerdown", (e) => { if (!info) return; zd = { x: e.clientX, s: start }; zoom.setPointerCapture(e.pointerId); });
+        zoom.addEventListener("pointermove", (e) => {
+            if (!zd) return;
+            start = clampStart(zd.s - (e.clientX - zd.x) / zoom.getBoundingClientRect().width * (eff() + 2));
+            draw();
+        });
+        const zEnd = () => { if (zd) { zd = null; commit(); } };
+        zoom.addEventListener("pointerup", zEnd);
+        zoom.addEventListener("pointercancel", zEnd);
+
+        aed.querySelectorAll(".luna-al-nud").forEach((b) => {
+            b.onclick = () => { start = clampStart(start + 0.1 * Number(b.dataset.n)); commit(); };
+        });
+        iSt.onchange = () => { const v = parseClock(iSt.value); if (v != null) start = clampStart(v); commit(); };
+        iDu.onchange = () => {
+            if (ws.wired) return;
+            const v = parseClock(iDu.value);
+            if (v != null && v > 0) dur = card.snap === "h3" ? snapH3Seconds(v) : v;
+            commit();
+        };
+        for (const inp of [iSt, iDu]) inp.addEventListener("keydown", (e) => { if (e.key === "Enter") inp.blur(); });
+
+        $(".luna-al-play").onclick = () => {
+            if (!info) return;
+            if (player && !player.paused) { stopPlay(); return; }
+            player = player || new Audio();
+            const src = soundURL(card.file);
+            if (!player.src.endsWith(src)) player.src = src;
+            const a = start, b = start + Math.min(eff(), total() - start);
+            player.currentTime = a;
+            player.play().catch(() => notice("The browser would not start playback."));
+            $(".luna-al-play").textContent = "■";
+            const tick = () => {
+                const t = player.currentTime;
+                if (t >= b || player.paused) { stopPlay(); return; }
+                const T = total(), W = wave.getBoundingClientRect().width, Z = zoom.getBoundingClientRect().width;
+                phW.style.display = phZ.style.display = "block";
+                phW.style.left = `${t / T * W}px`;
+                phZ.style.left = `${(t - (a - 1)) / (eff() + 2) * Z}px`;
+                playRaf = requestAnimationFrame(tick);
+            };
+            playRaf = requestAnimationFrame(tick);
+        };
+    }
+
+    return { root, render, selectCard: (i) => { selected = i; renderPanel(); }, natural, audioOpen: () => selAudio >= 0 };
 }
 
 /* ---------------------------------------------------------------- register */
 
 app.registerExtension({
     name: "LunaSaveSimple.AssetLoader",
+    beforeConfigureGraph(graphData) {
+        const moved = migrateWorkflowJSON(graphData);
+        if (moved.length) console.info("[Luna Asset Loader] updated a workflow saved before the audio/refs/timeline outputs:", moved);
+    },
     async beforeRegisterNodeDef(nodeType, nodeData) {
         if (nodeData?.name !== NODE) return;
 
@@ -873,10 +1381,16 @@ app.registerExtension({
             // Grid: work out how many rows the cards will wrap into at the node's
             // current width, so the node grows by row rather than by image.
             const CELL = 120, BAR = 34, PAD = 16, MINH = 150, MAXH = 720;
+            // The song editor's height, added up from its rows (head 20, song 64,
+            // ruler 12, zoom label 14, zoom 40, two number rows 52, two option
+            // rows 50, status 42, gaps and padding 66). Arithmetic, never measured.
+            const AUDIO_H = 360;
             const cardsHeight = () => {
                 const list = readPaths(this);
+                const sounds = readMedia(this).audio.length;
                 const cols = Math.max(1, Math.floor((this.size[0] - 24) / CELL));
-                const rows = Math.max(1, Math.ceil(list.length / cols));
+                const rows = Math.max(1, Math.ceil((list.length + sounds) / cols));
+                if (ui.audioOpen()) return Math.min(MAXH + AUDIO_H, BAR + PAD + rows * CELL + AUDIO_H);
                 // The resize panel only exists once there is something to resize,
                 // and grows a row when a mode or a ratio is chosen.
                 let panel = 0;
@@ -948,6 +1462,27 @@ app.registerExtension({
         nodeType.prototype.onConfigure = function () {
             const r = onConfigure?.apply(this, arguments);
             requestAnimationFrame(() => { applyCount(this); this._lunaRender?.(); });
+            return r;
+        };
+
+        // The run reports what the song window really delivered (and whether the
+        // file ran out); the editor shows it as "Last run".
+        const onExecuted = nodeType.prototype.onExecuted;
+        nodeType.prototype.onExecuted = function (message) {
+            const r = onExecuted?.apply(this, arguments);
+            const s = message?.luna_asset_audio?.[0];
+            if (s) _lastSong.set(this.id, s);
+            this._lunaRender?.();
+            return r;
+        };
+
+        // Wiring or unwiring `seconds` locks or frees the song's duration at once.
+        const onConn = nodeType.prototype.onConnectionsChange;
+        nodeType.prototype.onConnectionsChange = function (type, slot, connected, link, ioSlot) {
+            const r = onConn?.apply(this, arguments);
+            // setTimeout, not requestAnimationFrame: a background tab never runs the
+            // latter, and the lock must be right whenever the node is next seen.
+            if (ioSlot?.name === "seconds") setTimeout(() => this._lunaRender?.(), 0);
             return r;
         };
 

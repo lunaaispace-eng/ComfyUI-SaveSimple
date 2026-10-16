@@ -35,6 +35,19 @@ differs where this node's job differs: one state per image instead of one per
 node, `allow_upscale` defaulting to False because MiniMax H3 never upscales a
 reference, `snap` documented against H3's CANVAS_MULTIPLE of 32, and the order
 fixed as aspect -> size -> snap.
+
+Sound cards (v3, 2026-10-16). A sound card holds a song and the window of it the
+shot uses: start, duration, and what to do when the window runs off the end
+(silence or loop). The window is stored in `media_state` (JSON) and comes out on
+`audio`, exactly as long as asked — when the `seconds` input is wired, that is the
+duration, so the song always matches the shot length. Window maths: media_io.
+
+Outputs `audio`, `refs` and `timeline` sit at slots 4-6, BEFORE image_N. The
+frontend shrinks the node by removing trailing image_N slots, and ComfyUI maps an
+output to the returned tuple by index, so nothing may sit after the image block.
+Workflows saved before these three existed are migrated in the frontend before
+the graph is configured (js/luna_asset_loader.js, migrateWorkflowJSON) — see the
+2026-10-16 decision in STATUS for why it cannot happen later.
 """
 
 from __future__ import annotations
@@ -51,7 +64,10 @@ from PIL import Image, ImageOps
 import folder_paths
 import node_helpers
 
+from .media_io import FPS, load_audio_window
+
 MAX_IMAGES = 9  # MiniMax H3's own reference ceiling
+MAX_SOUNDS = 3  # MiniMax H3 takes three standalone sounds
 
 # Aspect ratios a reader is likely to have a name for. Reported alongside the
 # exact ratio, never instead of it: 832x1216 is exactly 13:19, and calling it
@@ -130,6 +146,32 @@ _DEFAULT_ITEM = {
     "allow_upscale": False,  # H3 never upscales a reference; the loader is the
                              # only place it can happen, so make it deliberate
 }
+
+
+def _parse_media(raw: str) -> dict:
+    """media_state JSON -> {"audio": [card, ...]}. A card: file, start, duration
+    (seconds, 0 = to the end of the file) and fill ("silence" | "loop")."""
+    try:
+        data = json.loads(raw or "{}")
+    except (TypeError, ValueError):
+        raise RuntimeError("[Luna Asset Loader] media_state is not valid JSON. "
+                           "Clear the sound cards and add them again.")
+    cards = []
+    for c in (data.get("audio") or [])[:MAX_SOUNDS]:
+        if not isinstance(c, dict) or not c.get("file"):
+            continue
+        cards.append({
+            "file": str(c["file"]),
+            "start": max(0.0, float(c.get("start") or 0.0)),
+            "duration": max(0.0, float(c.get("duration") or 0.0)),
+            "fill": "loop" if c.get("fill") == "loop" else "silence",
+        })
+    return {"audio": cards}
+
+
+def _clock(t: float) -> str:
+    m, s = divmod(max(0.0, t), 60.0)
+    return f"{int(m)}:{s:05.2f}"
 
 
 def _parse_state(raw: str, count: int) -> list[dict]:
@@ -239,10 +281,14 @@ def _conform(frames: list[torch.Tensor]) -> torch.Tensor:
 
 class LunaAssetLoader:
     DESCRIPTION = (
-        "Load up to 9 ordered reference images through one node. Numbered outputs keep "
-        "each image at its original size for the MiniMax H3 reference sockets; the "
-        "`images` batch feeds prompt writers. Card order is <Picture 1>, <Picture 2>, and "
-        "so on, and asset_brief states that mapping so nothing has to guess it."
+        "Load up to 9 ordered reference images and a song through one node. Numbered "
+        "outputs keep each image at its original size for the MiniMax H3 reference sockets; "
+        "the `images` batch feeds prompt writers. Card order is <Picture 1>, <Picture 2>, and "
+        "so on, and asset_brief states that mapping so nothing has to guess it.\n\n"
+        "Upload a sound file and it becomes a sound card. Select it to see the whole song: "
+        "drag the window to choose the part the shot uses, drag its edges or type Start and "
+        "Duration. Wire `seconds` (for example from the canvas node) and the duration is "
+        "locked to the shot length; only the start moves. `audio` delivers exactly that window."
     )
     CATEGORY = "Luna/Load"
     FUNCTION = "load"
@@ -251,9 +297,11 @@ class LunaAssetLoader:
     # slots to shrink the node, and ComfyUI maps outputs to the returned tuple by
     # INDEX — so anything that must keep its meaning has to sit at an index that
     # never moves. With image_N first, dropping image_3 would silently hand
-    # image_3's tensor to `images`.
-    RETURN_TYPES = ("IMAGE", "INT", "INT", "STRING") + ("IMAGE",) * MAX_IMAGES
-    RETURN_NAMES = ("images", "width", "height", "asset_brief") + tuple(
+    # image_3's tensor to `images`. audio/refs/timeline (v3) are fixed too, so they
+    # sit at 4-6; old saves are moved up by the frontend migration.
+    RETURN_TYPES = ("IMAGE", "INT", "INT", "STRING", "AUDIO", "LUNA_H3_REFS", "LUNA_TIMELINE") \
+        + ("IMAGE",) * MAX_IMAGES
+    RETURN_NAMES = ("images", "width", "height", "asset_brief", "audio", "refs", "timeline") + tuple(
         f"image_{i + 1}" for i in range(MAX_IMAGES)
     )
     # ComfyUI shows these when you hover an output socket, and the ⓘ panel lists
@@ -268,6 +316,13 @@ class LunaAssetLoader:
         "plus a warning when pictures 1 and 2 differ in aspect ratio, which FL2VA "
         "silently fixes by stretching the first frame and cropping the last. "
         "Feed it to a prompt writer so it knows which reference is which.",
+        "The song window from sound card 1: exactly the duration you set, or exactly the "
+        "seconds input when it is wired. Wire it to the save node so the finished video has "
+        "the same sound, or to an audio-sync node to make the picture follow it.",
+        "Every picture as a MiniMax H3 reference (<Picture 1> … in card order), for Luna H3 "
+        "Refs Out, which splits it into the sampler's ref_image sockets.",
+        "What sits on the shot timeline and where, in frames. Today: the song, locked from "
+        "frame 0. Pictures and clips join it in later versions of this node.",
     ) + tuple(
         f"Picture {i + 1} at its ORIGINAL size (only the batch is conformed), "
         f"in card order. Wire to the MiniMax H3 ref_image_{i} socket — or in FL2VA, "
@@ -294,37 +349,70 @@ class LunaAssetLoader:
                     "default": "", "multiline": True,
                     "tooltip": "Per-image resize, as JSON. Empty = every image passed through untouched, which is what REF2VA wants. {\"all\": {...}} applies one state to every image; {\"items\": [{...}, ...]} sets them individually and wins over \"all\". Keys: mode (off|max_mp|longest_side|scale_factor), max_mp, longest_side, scale_factor, ratio (\"16:9\"), ratio_action (crop|pad), crop_anchor, pad_color, snap (32 for H3), allow_upscale. Example — conform the first two frames for FL2VA and leave the references alone: {\"items\":[{\"ratio\":\"16:9\",\"snap\":32},{\"ratio\":\"16:9\",\"snap\":32}]}",
                 }),
+                # Added LAST on purpose: saved workflows keep their widget values by
+                # position, and a widget appended at the end shifts nothing.
+                "media_state": ("STRING", {
+                    "default": "",
+                    "tooltip": "The sound cards, as JSON, written by the card UI: {\"audio\": [{\"file\": \"song.mp3\", \"start\": 42.5, \"duration\": 5.17, \"fill\": \"silence\"}]}. start and duration are seconds; duration 0 = to the end of the file; fill is what happens when the window runs past the end (silence or loop).",
+                }),
+                "seconds": ("FLOAT", {
+                    "forceInput": True,
+                    "tooltip": "The shot length in seconds. Wired, it sets the song window's duration, so the song always matches the shot; the window then only moves. Unwired, the duration on the sound card is used.",
+                }),
             },
         }
 
     @classmethod
-    def IS_CHANGED(cls, image_paths, image_count, asset_state=""):
+    def IS_CHANGED(cls, image_paths, image_count, asset_state="", media_state="", **kwargs):
         # Hash the file contents, not just the names: re-uploading a changed
-        # picture under the same name must re-run the graph.
+        # picture under the same name must re-run the graph. Songs are big, so
+        # they are keyed on size and modification time instead.
         m = hashlib.sha256()
-        m.update(f"{image_count}|{asset_state}".encode("utf-8"))
+        m.update(f"{image_count}|{asset_state}|{media_state}".encode("utf-8"))
         for p in _split_paths(image_paths):
             resolved = folder_paths.get_annotated_filepath(p)
             m.update(p.encode("utf-8"))
             if resolved and os.path.isfile(resolved):
                 with open(resolved, "rb") as fh:
                     m.update(fh.read())
+        try:
+            cards = _parse_media(media_state)["audio"]
+        except RuntimeError:
+            cards = []
+        for c in cards:
+            resolved = folder_paths.get_annotated_filepath(c["file"])
+            if resolved and os.path.isfile(resolved):
+                s = os.stat(resolved)
+                m.update(f"{c['file']}|{s.st_size}|{s.st_mtime_ns}".encode("utf-8"))
         return m.hexdigest()
 
     @classmethod
-    def VALIDATE_INPUTS(cls, image_paths, image_count, asset_state=""):
+    def VALIDATE_INPUTS(cls, image_paths, image_count, **kwargs):
         paths = _split_paths(image_paths)
         if len(paths) > MAX_IMAGES:
             return (f"MiniMax H3 takes at most {MAX_IMAGES} reference images, "
                     f"but {len(paths)} lines are listed.")
         return True
 
-    def load(self, image_paths, image_count, asset_state=""):
+    def load(self, image_paths, image_count, asset_state="", media_state="", seconds=None):
         paths = _split_paths(image_paths)
-        if not paths:
+        cards = _parse_media(media_state)["audio"]
+        if not paths and not cards:
             raise RuntimeError(
-                "[Luna Asset Loader] No images listed. Put one file name per line."
+                "[Luna Asset Loader] Nothing loaded. Press Upload and add pictures or a song."
             )
+
+        audio, song, song_line = self._song(cards, seconds)
+        if not paths:
+            # A song on its own is a real use (the picture comes from elsewhere), so
+            # this is not an error — but the picture outputs stay empty, never black.
+            brief = song_line
+            refs = {"images": [], "videos": [], "video_audios": [], "audios": [],
+                    "brief": brief, "width": 0, "height": 0}
+            print(f"[Luna Asset Loader] no pictures; {song_line}")
+            return {"ui": {"luna_asset_audio": [song]},
+                    "result": (None, 0, 0, brief, audio, refs, self._timeline(song, seconds))
+                    + (None,) * MAX_IMAGES}
 
         states = _parse_state(asset_state, len(paths))
         loaded = [_load(p, st) for p, st in zip(paths, states)]
@@ -363,9 +451,47 @@ class LunaAssetLoader:
 
         numbered: list = [frames[i] if i < len(frames) else None for i in range(MAX_IMAGES)]
         w, h = dims[0]
+        if song_line:
+            brief += " " + song_line
+        refs = {"images": frames, "videos": [], "video_audios": [], "audios": [],
+                "brief": brief, "width": w, "height": h}
         print(f"[Luna Asset Loader] {len(frames)} image(s), showing {image_count} output(s); "
-              f"<Picture 1> = {w}x{h}")
-        return (_conform(frames), w, h, brief) + tuple(numbered)
+              f"<Picture 1> = {w}x{h}" + (f"; {song_line}" if song_line else ""))
+        result = (_conform(frames), w, h, brief, audio, refs, self._timeline(song, seconds)) \
+            + tuple(numbered)
+        return {"ui": {"luna_asset_audio": [song] if song else []}, "result": result}
+
+    @staticmethod
+    def _song(cards, seconds):
+        """Sound card 1 -> (AUDIO or None, info dict or None, one brief line)."""
+        if not cards:
+            return None, None, ""
+        c = cards[0]
+        path = folder_paths.get_annotated_filepath(c["file"])
+        if not path or not os.path.isfile(path):
+            raise RuntimeError(f"[Luna Asset Loader] Song not found in the input folder: {c['file']}")
+        wired = seconds is not None and float(seconds) > 0
+        want = float(seconds) if wired else c["duration"]
+        audio, info = load_audio_window(path, c["start"], want, c["fill"])
+        info["wired"] = wired
+        line = (f"Song: {info['name']} {_clock(info['start'])}-{_clock(info['start'] + info['seconds'])} "
+                f"({info['seconds']:.2f} s).")
+        if info["filled"] > 0.0005:
+            line += (f" The file ran out after {info['taken']:.2f} s; the last {info['filled']:.2f} s "
+                     f"{'loop back to its start' if info['mode'] == 'loop' else 'are silence'}.")
+            print(f"[Luna Asset Loader] {line}")
+        return audio, info, line
+
+    @staticmethod
+    def _timeline(song, seconds):
+        """Placements on the shot, in frames at H3's 24 fps. v1 holds only the song."""
+        items = []
+        if song:
+            items.append({"kind": "audio", "role": "lock", "at": 0, "file": song["name"],
+                          "start": round(song["start"], 4), "seconds": round(song["seconds"], 4)})
+        shot = float(seconds) if seconds is not None and float(seconds) > 0 else None
+        return {"version": 1, "fps": FPS,
+                "frames": int(round(shot * FPS)) if shot else None, "items": items}
 
 
 NODE_CLASS_MAPPINGS = {"LunaAssetLoader": LunaAssetLoader}

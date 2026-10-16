@@ -224,11 +224,17 @@ pack. Details in the header of `asset_loader.py`.
 ## Outputs
 
 ```text
-images        IMAGE   all pictures as ONE batch, conformed to image 1's size
-width, height INT     image 1's size AFTER its resize
-asset_brief   STRING  "<Picture 1> = 1920x1056 (20:11, landscape); ..."
-image_1 … 9   IMAGE   each at its ORIGINAL size, in card order
+images        IMAGE          all pictures as ONE batch, conformed to image 1's size
+width, height INT            image 1's size AFTER its resize
+asset_brief   STRING         "<Picture 1> = 1920x1056 (20:11, landscape); ... Song: ..."
+audio         AUDIO          the song window from sound card A1, exactly as long as set
+refs          LUNA_H3_REFS   the pictures as MiniMax H3 references, for Luna H3 Refs Out
+timeline      LUNA_TIMELINE  what sits on the shot and where, in frames (today: the song)
+image_1 … 9   IMAGE          each at its ORIGINAL size, in card order
 ```
+
+Workflows saved before `audio`, `refs` and `timeline` existed are updated when they
+open: their `image_N` wires stay on the same pictures.
 
 An `IMAGE` batch cannot hold mixed dimensions, so only the batch is conformed —
 the numbered outputs stay untouched, because conforming them would destroy the
@@ -239,9 +245,9 @@ aspect information the model wants.
 | Control | What it does |
 | --- | --- |
 | **Image slots `− N +`** | top left of the node — how many numbered outputs show; click `N` to type one |
-| **Upload** | multi-select; posts to ComfyUI's `/upload/image` |
-| **Clear** | empties the list |
-| **Fields** | shows the raw `image_paths` / `image_count` / `asset_state` widgets |
+| **Upload** | multi-select pictures and sound files; posts to ComfyUI's `/upload/image` |
+| **Clear** | empties the list, pictures and sounds |
+| **Fields** | shows the raw `image_paths` / `image_count` / `asset_state` / `media_state` widgets |
 | **drag a card** | reorder — this renumbers `<Picture N>` |
 | **click a card** | selects it; the preview and resize panel follow |
 
@@ -251,6 +257,24 @@ works if you type into the field directly.
 
 Showing fewer outputs than you have images is intentional: the extra pictures stay
 loaded and a drag promotes one into an active slot, leaving the rest parked.
+
+## Sound cards — the song
+
+Upload a sound file (wav, mp3, flac, ogg, m4a …) and it becomes a pink sound card,
+`A1`. Select it and the preview turns into the song editor:
+
+| Control | What it does |
+| --- | --- |
+| **the whole song** | drag the yellow window to move it; drag its edges to change the length; click elsewhere on the song to centre the window there |
+| **zoom strip** | the window ± 1 s with a 0.5 s grid; drag it to place the cut finely |
+| **Start / Duration / End** | the same window as numbers (`1:23.45` or seconds); ◀ ▶ move it by 0.1 s |
+| **Song ends** | what fills the window when it runs past the end of the file: silence, or the song again from its start — the editor and the run both say when this happens |
+| **Snap** | snap the duration to MiniMax H3 shot lengths (17k+5 frames at 24 fps) |
+| **▶** | plays the window |
+
+Wire **`seconds`** (the shot length) and the duration is locked to it — the song
+then always matches the shot, and only the start moves. `audio` delivers exactly
+that window, sample for sample.
 
 ## Per-image resize
 
