@@ -98,6 +98,206 @@ def _target_size(width: int, height: int, short_edge: int) -> tuple[int, int]:
     return max(2, tw - (tw % 2)), max(2, th - (th % 2))
 
 
+# --- the video card ------------------------------------------------------------
+# A clip is chosen by start (seconds) and length (frames at the OUTPUT rate), then
+# resampled, sized and thinned as the card says. Kept pure where possible so the
+# rules can be tested without a video file.
+
+def grid_frames(n: int, grid: str) -> int:
+    """Nearest frame count the target accepts: free, H3 (17k+5) or LTX (8k+1)."""
+    n = max(1, int(n))
+    if grid == "h3":
+        return snap_frames_nearest(n)
+    if grid == "ltx":
+        return max(1, int(round((n - 1) / 8.0)) * 8 + 1)
+    return n
+
+
+def pick_frames(src_times: list, out_fps: float, start_s: float, count: int) -> list:
+    """Source frame index for each output frame: the latest source frame at or
+    before each output time (sample and hold), so 30 -> 24 fps drops frames,
+    12 -> 24 holds them, and motion stays in real time. Stops where the source
+    ends instead of holding the last frame forever."""
+    if not src_times or count <= 0 or out_fps <= 0:
+        return []
+    gaps = sorted(b - a for a, b in zip(src_times, src_times[1:]) if b > a)
+    dt = gaps[len(gaps) // 2] if gaps else 1.0 / out_fps
+    end = src_times[-1] + dt
+    out, j = [], -1
+    for k in range(int(count)):
+        target = float(start_s) + k / float(out_fps)
+        if target >= end - 1e-9:
+            break
+        while j + 1 < len(src_times) and src_times[j + 1] <= target + 1e-9:
+            j += 1
+        out.append(max(j, 0))
+    return out
+
+
+def fit_box(src_w: int, src_h: int, tw: int, th: int, fit: str) -> tuple:
+    """(scaled_w, scaled_h, x, y). crop: cover the box, (x, y) = where to cut from;
+    pad: fit inside, (x, y) = where to paste into the box; stretch: the box itself."""
+    if fit == "stretch":
+        return int(tw), int(th), 0, 0
+    s = (max if fit == "crop" else min)(tw / float(src_w), th / float(src_h))
+    w, h = int(round(src_w * s)), int(round(src_h * s))
+    if fit == "crop":
+        return w, h, (w - tw) // 2, (h - th) // 2
+    return w, h, (tw - w) // 2, (th - h) // 2
+
+
+def clip_bytes(frames: int, width: int, height: int, precision: str = "fp16") -> int:
+    """What the frames cost as an IMAGE tensor, RGB."""
+    return int(frames) * int(width) * int(height) * 3 * (2 if precision == "fp16" else 4)
+
+
+def probe_media(path: str) -> dict:
+    """What a file holds, for the card UI: video size/fps/length, sound or not."""
+    import av
+    out = {"name": os.path.basename(path), "video": False, "audio": False}
+    with av.open(path) as c:
+        if c.duration:
+            out["duration"] = c.duration / 1_000_000.0
+        if c.streams.video:
+            v = c.streams.video[0]
+            fps = float(v.average_rate) if v.average_rate else 0.0
+            dur = float(v.duration * v.time_base) if v.duration and v.time_base else out.get("duration", 0.0)
+            out.update(video=True, width=int(v.codec_context.width or 0), height=int(v.codec_context.height or 0),
+                       fps=fps, duration=dur, frames=int(v.frames or round(dur * fps)))
+        if c.streams.audio:
+            a = c.streams.audio[0]
+            out.update(audio=True, sample_rate=int(a.rate or 0), channels=int(a.channels or 0))
+    return out
+
+
+def decode_clip(path: str, start_s: float, frames: int, out_fps: float | None = None,
+                size: tuple = ("source",), fit: str = "crop", nth: int = 1,
+                precision: str = "fp16", grid: str = "free"):
+    """One video window -> ([N, H, W, 3] float, info).
+
+    start_s: where the clip opens in the source. frames: how many output frames,
+    counted at out_fps (None = the source's own rate). size: ("source",),
+    ("edge", short_edge) or ("box", w, h) with `fit` crop | pad | stretch.
+    nth > 1 keeps every nth output frame. When the source runs out first, the
+    clip is cut DOWN to the grid's last valid length — never padded."""
+    import av
+
+    nth = max(1, int(nth))
+    with av.open(path) as container:
+        if not container.streams.video:
+            raise RuntimeError(f"[Luna Asset Loader] {os.path.basename(path)} has no video stream.")
+        stream = container.streams.video[0]
+        stream.thread_type = "AUTO"
+        sw, sh = int(stream.codec_context.width or 0), int(stream.codec_context.height or 0)
+        if not sw or not sh:
+            raise RuntimeError(f"[Luna Asset Loader] Could not read the frame size of {os.path.basename(path)}.")
+        src_fps = float(stream.average_rate) if stream.average_rate else float(FPS)
+        fps = float(out_fps) if out_fps else src_fps
+
+        if size[0] == "box":
+            tw, th = int(size[1]), int(size[2])
+            scw, sch, ox, oy = fit_box(sw, sh, tw, th, fit)
+        elif size[0] == "edge":
+            tw, th = _target_size(sw, sh, int(size[1]))
+            scw, sch, ox, oy = tw, th, 0, 0
+        else:
+            tw, th, scw, sch, ox, oy = sw, sh, sw, sh, 0, 0
+
+        start_s = max(0.0, float(start_s or 0.0))
+        stop_s = start_s + int(frames) / fps + 2.0 / src_fps
+        if start_s > 0 and stream.time_base:
+            try:   # keyframe-accurate; the time test below trims exactly
+                container.seek(int(start_s / stream.time_base), stream=stream)
+            except Exception:
+                pass
+        times, imgs = [], []
+        for frame in container.decode(stream):
+            t = float(frame.pts * stream.time_base) if frame.pts is not None else (times[-1] + 1 / src_fps if times else 0.0)
+            if t + 1.0 / src_fps < start_s:
+                continue
+            if t > stop_s:
+                break
+            img = frame.reformat(width=scw, height=sch, format="rgb24").to_ndarray()
+            if fit == "crop" and size[0] == "box":
+                img = img[oy:oy + th, ox:ox + tw]
+            elif fit == "pad" and size[0] == "box":
+                box = np.zeros((th, tw, 3), dtype=np.uint8)
+                box[oy:oy + sch, ox:ox + scw] = img
+                img = box
+            times.append(t)
+            imgs.append(img)
+
+    idx = pick_frames(times, fps, start_s, int(frames))
+    if not idx:
+        raise RuntimeError(
+            f"[Luna Asset Loader] No frames in {os.path.basename(path)} from {start_s:.2f}s — "
+            f"the start may be past the end of the clip.")
+    got = len(idx)
+    if got < int(frames) and grid != "free":
+        keep = snap_frames_down(got) if grid == "h3" else max(1, ((got - 1) // 8) * 8 + 1)
+        if keep == 0:
+            raise RuntimeError(
+                f"[Luna Asset Loader] {os.path.basename(path)} gave only {got} frame(s) from "
+                f"{start_s:.2f}s; MiniMax H3 needs at least {FRAME_PLUS}.")
+        idx = idx[:keep]
+    seconds = len(idx) / fps
+    idx = idx[::nth]
+    arr = np.stack([imgs[i] for i in idx])
+    t = torch.from_numpy(arr).to(torch.float16 if precision == "fp16" else torch.float32) / 255.0
+    return t, {
+        "name": os.path.basename(path), "frames": len(idx), "asked": int(frames),
+        "short": got < int(frames), "seconds": seconds, "fps": fps / nth, "source_fps": src_fps,
+        "width": tw, "height": th, "source_size": (sw, sh), "start": start_s, "nth": nth,
+    }
+
+
+def clip_soundtrack(path: str, start_s: float, seconds: float):
+    """The clip's own sound for exactly its window, or None when the file has none."""
+    import av
+    with av.open(path) as c:
+        if not c.streams.audio:
+            return None
+    waveform, sr = _decode_audio(path)
+    if waveform.ndim == 1:
+        waveform = waveform.unsqueeze(0)
+    plan = plan_window(int(waveform.shape[-1]), int(sr), start_s, seconds)
+    if plan["take"] <= 0:
+        return None
+    # Cut, never filled: a reference's sound ends where its picture ends.
+    plan = {**plan, "want": plan["take"], "fill": 0}
+    return {"waveform": apply_window(waveform, plan).unsqueeze(0), "sample_rate": int(sr)}
+
+
+def filmstrip_jpeg(path: str, count: int = 12, height: int = 72) -> bytes:
+    """`count` evenly spaced frames side by side, for the card UI's film strip."""
+    import io
+
+    import av
+    from PIL import Image
+
+    count = max(1, min(48, int(count)))
+    tiles = []
+    with av.open(path) as c:
+        v = c.streams.video[0]
+        dur = (v.duration * v.time_base) if v.duration and v.time_base else (c.duration or 0) / 1_000_000.0
+        dur = float(dur or 0.0)
+        w = int(round((v.codec_context.width or 16) * height / float(v.codec_context.height or 9)))
+        for k in range(count):
+            t = dur * (k + 0.5) / count
+            try:
+                c.seek(int(t / v.time_base), stream=v)
+                frame = next(c.decode(v))
+                tiles.append(frame.to_image().resize((w, height)))
+            except Exception:
+                tiles.append(Image.new("RGB", (w, height), (20, 21, 26)))
+    strip = Image.new("RGB", (w * len(tiles), height))
+    for i, im in enumerate(tiles):
+        strip.paste(im, (i * w, 0))
+    buf = io.BytesIO()
+    strip.save(buf, format="JPEG", quality=80)
+    return buf.getvalue()
+
+
 def decode_video(path: str, start_s: float = 0.0, seconds: float = 0.0,
                  short_edge: int = REF_VIDEO_SHORT_EDGE):
     """One video file -> ([N, H, W, 3] float 0-1 at 24 fps, info dict).

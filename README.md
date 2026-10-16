@@ -291,6 +291,33 @@ so sound and picture line up at every cut.
   together. A thin strip on top of the song shows every shot's window.
 - A shot number past the end of the song stops the run with the shot count.
 
+## Video cards — clips
+
+Upload a clip (mp4, mov, mkv, webm …) and it becomes an orange video card, `V1`
+… `V3` — MiniMax H3's `<Video 1>` … in that order. Select it for the clip editor:
+a preview, the whole clip as a film strip with a window over it, and the load
+settings.
+
+| Control | What it does |
+| --- | --- |
+| **film strip** | drag the window to choose the part; drag its edges to change the length; click elsewhere to centre it there |
+| **Start / Length** | the window as numbers; ◀ ▶ move one source frame, − + step the length (along the H3 grid when Frames is H3) |
+| **Frame rate** | H3 (24), the source's own rate, 24, 25 or 30 — frames are dropped or held, never blended, so motion stays in real time |
+| **Frames** | H3 grid (17k+5, nearest) or Free |
+| **Size / Fit** | Match canvas (wire `width` and `height`; crop to fill, pad or stretch), 768 short edge, or Source |
+| **Every Nth** | keep every 2nd, 3rd or 4th frame |
+| **Soundtrack** | keep the clip's own sound (cut to the clip) or drop it |
+| **Precision** | fp16 halves the memory |
+
+Before anything decodes, the editor shows what the clip will cost — "39 frames at
+1344×768 = 0.24 GB as fp16" — and a clip over 6 GB is refused with that number
+instead of filling the machine's memory mid-run. A clip that ends before its
+window is cut down to the H3 grid, never padded.
+
+Clips reach MiniMax H3 through **`refs`** → Luna H3 Refs Out (`ref_video_0..2`,
+`ref_video_audio_0..2`). A kept soundtrack is the `<Audio>` right before its
+`<Video>`, and `asset_brief` names which is which.
+
 ## Per-image resize
 
 `mode` defaults to `off` — nothing is touched unless asked, which is what H3's

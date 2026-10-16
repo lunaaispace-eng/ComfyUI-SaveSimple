@@ -64,10 +64,13 @@ from PIL import Image, ImageOps
 import folder_paths
 import node_helpers
 
-from .media_io import FPS, load_audio_window, song_shot_count, song_shot_start
+from .media_io import (FPS, clip_bytes, clip_soundtrack, decode_clip, filmstrip_jpeg, grid_frames,
+                       load_audio_window, probe_media, song_shot_count, song_shot_start)
 
 MAX_IMAGES = 9  # MiniMax H3's own reference ceiling
 MAX_SOUNDS = 3  # MiniMax H3 takes three standalone sounds
+MAX_VIDEOS = 3  # MiniMax H3 takes three reference clips
+MEMORY_CAP = 6 * 1024 ** 3   # refuse a clip bigger than this BEFORE decoding it
 
 # Aspect ratios a reader is likely to have a name for. Reported alongside the
 # exact ratio, never instead of it: 832x1216 is exactly 13:19, and calling it
@@ -172,7 +175,25 @@ def _parse_media(raw: str) -> dict:
             "shot": max(1, int(c.get("shot") or 1)),
             "overlap": max(0, int(c.get("overlap") if c.get("overlap") is not None else 22)),
         })
-    return {"audio": cards}
+    clips = []
+    for c in (data.get("video") or [])[:MAX_VIDEOS]:
+        if not isinstance(c, dict) or not c.get("file"):
+            continue
+        fps = c.get("fps", "target")
+        clips.append({
+            "file": str(c["file"]),
+            "start": max(0.0, float(c.get("start") or 0.0)),
+            "frames": max(1, int(c.get("frames") or 124)),
+            # "target" = the target model's rate (24 for MiniMax H3), "source" = as filmed
+            "fps": fps if fps in ("target", "source") else max(1.0, float(fps)),
+            "count": "free" if c.get("count") == "free" else "target",
+            "size": c.get("size") if c.get("size") in ("canvas", "edge", "source") else "canvas",
+            "fit": c.get("fit") if c.get("fit") in ("crop", "pad", "stretch") else "crop",
+            "nth": max(1, int(c.get("nth") or 1)),
+            "sound": "drop" if c.get("sound") == "drop" else "keep",
+            "precision": "fp32" if c.get("precision") == "fp32" else "fp16",
+        })
+    return {"audio": cards, "video": clips}
 
 
 def _clock(t: float) -> str:
@@ -369,6 +390,14 @@ class LunaAssetLoader:
                     "forceInput": True,
                     "tooltip": "Which shot of the song this run makes, counting from 1. Only used when the sound card's Position is 'By shot number': shot n starts where shot n-1 started plus the shot length minus the overlap. Unwired, the shot number on the sound card is used.",
                 }),
+                "width": ("INT", {
+                    "forceInput": True,
+                    "tooltip": "The generation width, for example from the canvas node. Video cards set to 'Match canvas' are cut to width x height. Unwired, they keep their shape at a 768 short edge.",
+                }),
+                "height": ("INT", {
+                    "forceInput": True,
+                    "tooltip": "The generation height. See width.",
+                }),
             },
         }
 
@@ -386,7 +415,8 @@ class LunaAssetLoader:
                 with open(resolved, "rb") as fh:
                     m.update(fh.read())
         try:
-            cards = _parse_media(media_state)["audio"]
+            media = _parse_media(media_state)
+            cards = media["audio"] + media["video"]
         except RuntimeError:
             cards = []
         for c in cards:
@@ -404,23 +434,27 @@ class LunaAssetLoader:
                     f"but {len(paths)} lines are listed.")
         return True
 
-    def load(self, image_paths, image_count, asset_state="", media_state="", seconds=None, shot=None):
+    def load(self, image_paths, image_count, asset_state="", media_state="", seconds=None, shot=None,
+             width=None, height=None):
         paths = _split_paths(image_paths)
-        cards = _parse_media(media_state)["audio"]
-        if not paths and not cards:
+        media = _parse_media(media_state)
+        cards, clips = media["audio"], media["video"]
+        if not paths and not cards and not clips:
             raise RuntimeError(
-                "[Luna Asset Loader] Nothing loaded. Press Upload and add pictures or a song."
+                "[Luna Asset Loader] Nothing loaded. Press Upload and add pictures, clips or a song."
             )
 
         audio, song, song_line = self._song(cards, seconds, shot)
+        videos, soundtracks, clip_lines = self._clips(clips, width, height)
         if not paths:
-            # A song on its own is a real use (the picture comes from elsewhere), so
-            # this is not an error — but the picture outputs stay empty, never black.
-            brief = song_line
-            refs = {"images": [], "videos": [], "video_audios": [], "audios": [],
+            # A song or clips on their own are a real use (the pictures come from
+            # elsewhere), so this is not an error — but the picture outputs stay
+            # empty, never black.
+            brief = " ".join(x for x in [" ".join(clip_lines), song_line] if x)
+            refs = {"images": [], "videos": videos, "video_audios": soundtracks, "audios": [],
                     "brief": brief, "width": 0, "height": 0}
-            print(f"[Luna Asset Loader] no pictures; {song_line}")
-            return {"ui": {"luna_asset_audio": [song]},
+            print(f"[Luna Asset Loader] no pictures; {brief}")
+            return {"ui": {"luna_asset_audio": [song] if song else []},
                     "result": (None, 0, 0, brief, audio, refs, self._timeline(song, seconds))
                     + (None,) * MAX_IMAGES}
 
@@ -461,15 +495,68 @@ class LunaAssetLoader:
 
         numbered: list = [frames[i] if i < len(frames) else None for i in range(MAX_IMAGES)]
         w, h = dims[0]
-        if song_line:
-            brief += " " + song_line
-        refs = {"images": frames, "videos": [], "video_audios": [], "audios": [],
+        for extra in clip_lines + ([song_line] if song_line else []):
+            brief += " " + extra
+        refs = {"images": frames, "videos": videos, "video_audios": soundtracks, "audios": [],
                 "brief": brief, "width": w, "height": h}
         print(f"[Luna Asset Loader] {len(frames)} image(s), showing {image_count} output(s); "
               f"<Picture 1> = {w}x{h}" + (f"; {song_line}" if song_line else ""))
         result = (_conform(frames), w, h, brief, audio, refs, self._timeline(song, seconds)) \
             + tuple(numbered)
         return {"ui": {"luna_asset_audio": [song] if song else []}, "result": result}
+
+    @staticmethod
+    def _clips(clips, width, height):
+        """Video cards -> (frame batches, soundtracks or None, brief lines).
+
+        MiniMax H3 numbers sounds by order of appearance: a clip's soundtrack is the
+        <Audio j> right before its <Video k>, so with sound kept on clips 1 and 3
+        they are <Audio 1> and <Audio 2>. The brief says which is which."""
+        videos, sounds, lines, audio_no = [], [], [], 0
+        box = (int(width), int(height)) if width and height and int(width) > 0 and int(height) > 0 else None
+        for k, c in enumerate(clips, 1):
+            path = folder_paths.get_annotated_filepath(c["file"])
+            if not path or not os.path.isfile(path):
+                raise RuntimeError(f"[Luna Asset Loader] Clip not found in the input folder: {c['file']}")
+            info = probe_media(path)
+            if not info.get("video"):
+                raise RuntimeError(f"[Luna Asset Loader] {c['file']} has no picture, only sound.")
+            fps = FPS if c["fps"] == "target" else (info["fps"] or FPS) if c["fps"] == "source" else c["fps"]
+            frames = grid_frames(c["frames"], "h3") if c["count"] == "target" else c["frames"]
+            if c["size"] == "canvas" and box:
+                size, (ow, oh) = ("box", box[0], box[1]), box
+            elif c["size"] == "source":
+                size, (ow, oh) = ("source",), (info["width"], info["height"])
+            else:   # 768 short edge, also the fallback when no canvas size is wired
+                size = ("edge", 768)
+                s = min(1.0, 768.0 / min(info["width"], info["height"]))
+                ow, oh = int(round(info["width"] * s)), int(round(info["height"] * s))
+                ow, oh = max(2, ow - ow % 2), max(2, oh - oh % 2)   # media_io._target_size's even rule
+            cost = clip_bytes(-(-frames // c["nth"]), ow, oh, c["precision"])
+            if cost > MEMORY_CAP:
+                raise RuntimeError(
+                    f"[Luna Asset Loader] <Video {k}> ({c['file']}) would need {cost / 1024 ** 3:.1f} GB as "
+                    f"{frames} frames at {ow}x{oh} {c['precision']} — more than the {MEMORY_CAP / 1024 ** 3:.0f} GB "
+                    f"this node allows. Shorten it, take every 2nd frame, use fp16 or a smaller size.")
+            batch, got = decode_clip(path, c["start"], frames, fps, size, c["fit"], c["nth"], c["precision"],
+                                     "h3" if c["count"] == "target" else "free")
+            videos.append(batch)
+            sound = clip_soundtrack(path, got["start"], got["seconds"]) if c["sound"] == "keep" else None
+            sounds.append(sound)
+            line = (f"<Video {k}> = {got['name']} from {_clock(got['start'])}, {got['frames']} frames "
+                    f"({got['seconds']:.2f} s) at {got['fps']:g} fps, {got['width']}x{got['height']}")
+            how = {"canvas": c["fit"] if box else "768 short edge", "edge": "768 short edge", "source": "as filmed"}[c["size"]]
+            line += f" (from {got['source_size'][0]}x{got['source_size'][1]} at {got['source_fps']:g} fps, {how})"
+            if got["short"]:
+                line += f"; the clip ran out, so {got['frames'] * got['nth']} of the {frames} frames asked for"
+            if sound is not None:
+                audio_no += 1
+                line += f"; its sound is <Audio {audio_no}>"
+            elif c["sound"] == "keep":
+                line += "; it has no sound"
+            lines.append(line + ".")
+            print(f"[Luna Asset Loader] {line}")
+        return videos, sounds, lines
 
     @staticmethod
     def _song(cards, seconds, shot=None):
@@ -532,6 +619,59 @@ class LunaAssetLoader:
         shot = float(seconds) if seconds is not None and float(seconds) > 0 else None
         return {"version": 1, "fps": FPS,
                 "frames": int(round(shot * FPS)) if shot else None, "items": items}
+
+
+def _input_file(name: str):
+    """A file name from the browser -> a real file inside ComfyUI's input folder, or None.
+
+    The name is screened BEFORE anything touches the disk: on Windows merely
+    resolving \\\\host\\share opens SMB, and these routes take any caller's input."""
+    if not name or not isinstance(name, str) or "\x00" in name:
+        return None
+    bare = name.split(" [")[0]
+    if os.path.isabs(bare) or bare.startswith(("\\", "/")) or ":" in bare or ".." in bare.replace("\\", "/").split("/"):
+        return None
+    root = os.path.realpath(folder_paths.get_input_directory())
+    path = os.path.realpath(os.path.join(root, bare))
+    if os.path.commonpath([root, path]) != root or not os.path.isfile(path):
+        return None
+    return path
+
+
+try:
+    from aiohttp import web
+    from server import PromptServer
+except ImportError:   # imported outside ComfyUI (tests): no routes
+    PromptServer = None
+
+if PromptServer is not None:
+    @PromptServer.instance.routes.get("/lunasave/media-info")
+    async def _luna_media_info(request):
+        """Size, frame rate, length and sound of a clip, for the video card."""
+        path = _input_file(request.query.get("file", ""))
+        if not path:
+            return web.json_response({"error": "not found"}, status=404)
+        try:
+            return web.json_response(probe_media(path))
+        except Exception as e:
+            return web.json_response({"error": f"cannot read: {type(e).__name__}"}, status=415)
+
+    @PromptServer.instance.routes.get("/lunasave/filmstrip")
+    async def _luna_filmstrip(request):
+        """Evenly spaced frames side by side, as one JPEG, for the film strip."""
+        path = _input_file(request.query.get("file", ""))
+        if not path:
+            return web.Response(status=404)
+        try:
+            n = int(request.query.get("n", "12"))
+        except ValueError:
+            n = 12
+        try:
+            data = filmstrip_jpeg(path, n)
+        except Exception:
+            return web.Response(status=415)
+        return web.Response(body=data, content_type="image/jpeg",
+                            headers={"Cache-Control": "max-age=3600"})
 
 
 NODE_CLASS_MAPPINGS = {"LunaAssetLoader": LunaAssetLoader}

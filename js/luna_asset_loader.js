@@ -155,6 +155,17 @@ const CSS = `
 .luna-al-astat { font-size:10px; color:var(--luna-muted); border-top:1px solid var(--luna-border); padding-top:5px; line-height:1.45; }
 .luna-al-astat b { color:var(--luna-text); font-weight:600; }
 .luna-al-astat .w { color:#f0a49a; }
+
+/* Video cards and the clip editor (v3). Orange marks clips, pink sound. */
+.luna-al-pic.vid { background:#d98a6a; }
+.luna-al-vthumb { display:block; width:100%; aspect-ratio:1/1; object-fit:cover; background:var(--luna-bg); }
+.luna-al-ved { display:flex; flex-direction:column; gap:6px; border:1px solid var(--luna-border);
+               border-radius:8px; background:var(--luna-bg); padding:7px; }
+.luna-al-ved .luna-al-ahead b { color:#d98a6a; }
+.luna-al-video { display:block; width:100%; height:150px; background:#000; border-radius:6px; object-fit:contain; }
+.luna-al-strip { position:relative; height:46px; border-radius:6px; background-color:#101116;
+                 background-size:100% 100%; background-repeat:no-repeat; overflow:hidden; cursor:crosshair; }
+.luna-al-sect { font-size:10.5px; color:var(--luna-accent); font-weight:600; margin-top:2px; }
 `;
 
 function injectCSS() {
@@ -255,7 +266,36 @@ const soundURL = (name) => `/view?filename=${encodeURIComponent(name)}&type=inpu
 /* ------------------------------------------------------------- sound cards */
 
 const MEDIA_WIDGET = "media_state";
-const WIRED_INPUTS = ["seconds", "shot"];   // sockets whose value the song editor shows
+const WIRED_INPUTS = ["seconds", "shot", "width", "height"];   // sockets whose value the editors show
+const MAX_VIDEOS = 3;
+const VIDEO_EXT = /\.(mp4|mov|mkv|webm|avi|m4v|mpg|mpeg|wmv|flv)$/i;
+const isVideoFile = (f) => (f.type || "").startsWith("video/") || VIDEO_EXT.test(f.name || "");
+const MEMORY_CAP_GB = 6;          // asset_loader.py MEMORY_CAP; the run refuses above it
+const NEW_VIDEO = { start: 0, frames: 124, fps: "target", count: "target", size: "canvas", fit: "crop",
+                    nth: 1, sound: "keep", precision: "fp16" };
+
+// Clip facts (size, fps, length, sound) come from the server: the browser's
+// <video> element does not expose a frame rate.
+const _mediaInfo = new Map();
+function mediaInfo(file) {
+    if (!_mediaInfo.has(file)) {
+        const p = fetch(`/lunasave/media-info?file=${encodeURIComponent(file)}`)
+            .then((r) => (r.ok ? r.json() : Promise.reject(new Error(r.status))));
+        p.catch(() => _mediaInfo.delete(file));
+        _mediaInfo.set(file, p);
+    }
+    return _mediaInfo.get(file);
+}
+const stripURL = (file, n) => `/lunasave/filmstrip?file=${encodeURIComponent(file)}&n=${n}`;
+
+// H3 clip lengths are 17k+5 frames; step to the previous / next one.
+function stepH3Frames(n, dir) {
+    let f = Math.max(5, Math.round(n));
+    if (dir > 0) { f += 1; while (f % 17 !== 5) f += 1; }
+    else { f -= 1; while (f > 5 && f % 17 !== 5) f -= 1; f = Math.max(5, f); }
+    return f;
+}
+const nearestH3Frames = (n) => Math.round(snapH3Seconds(n / H3_FPS) * H3_FPS);
 
 // The numbers on the nodes feeding `seconds` and `shot`, as one string. Checked on
 // every draw, so editing the Float/Int upstream moves the window straight away.
@@ -278,14 +318,20 @@ const isAudioFile = (f) => (f.type || "").startsWith("audio/") || AUDIO_EXT.test
 function readMedia(node) {
     try {
         const m = JSON.parse(String(widget(node, MEDIA_WIDGET)?.value || "") || "{}");
-        return { audio: Array.isArray(m.audio) ? m.audio.filter((c) => c && c.file) : [] };
-    } catch { return { audio: [] }; }
+        return {
+            audio: Array.isArray(m.audio) ? m.audio.filter((c) => c && c.file) : [],
+            video: Array.isArray(m.video) ? m.video.filter((c) => c && c.file) : [],
+        };
+    } catch { return { audio: [], video: [] }; }
 }
 
 function writeMedia(node, m) {
     const w = widget(node, MEDIA_WIDGET);
     if (!w) return;
-    w.value = m.audio.length ? JSON.stringify({ audio: m.audio }) : "";
+    const out = {};
+    if (m.audio?.length) out.audio = m.audio;
+    if (m.video?.length) out.video = m.video;
+    w.value = Object.keys(out).length ? JSON.stringify(out) : "";
     w.callback?.(w.value);
     node.graph?.setDirtyCanvas(true, true);
 }
@@ -723,10 +769,23 @@ function buildUI(node) {
     aed.style.display = "none";
     // Drags and typing in here belong to the editor, never to the canvas.
     for (const ev of ["pointerdown", "keydown", "wheel"]) aed.addEventListener(ev, (e) => e.stopPropagation());
-    root.append(bar, cards, preview, panel, aed);
+    // The clip editor, same idea, while a video card is selected.
+    const ved = document.createElement("div");
+    ved.className = "luna-al-ved";
+    ved.style.display = "none";
+    for (const ev of ["pointerdown", "keydown", "wheel"]) ved.addEventListener(ev, (e) => e.stopPropagation());
+    root.append(bar, cards, preview, panel, aed, ved);
 
     let selected = 0;                 // which card the resize panel edits
-    let selAudio = -1;                // which sound card the song editor edits; -1 = a picture is selected
+    let selAudio = -1;                // which sound card the song editor edits; -1 = none
+    let selVideo = -1;                // which video card the clip editor edits; -1 = none
+    // One editor at a time: picking a card of one kind clears the others.
+    const pick = (kind, i) => {
+        selAudio = kind === "a" ? i : -1;
+        selVideo = kind === "v" ? i : -1;
+        if (kind === "p") selected = i;
+        render();
+    };
     const natural = new Map();        // filename -> [w, h], filled as thumbs decode
 
     const picker = document.createElement("input");
@@ -748,7 +807,7 @@ function buildUI(node) {
     mkBtn("Upload", "", () => picker.click());
     mkBtn("Clear", "danger", () => {
         writePaths(node, []); syncCount(node, 0);
-        writeMedia(node, { audio: [] }); selAudio = -1;
+        writeMedia(node, { audio: [], video: [] }); selAudio = -1; selVideo = -1;
         render();
     });
 
@@ -816,15 +875,25 @@ function buildUI(node) {
         const files = Array.from(picker.files || []);
         picker.value = "";
         if (!files.length) return;
-        // One button for everything: sound files become sound cards, the rest pictures.
-        const sounds = files.filter(isAudioFile), pictures = files.filter((f) => !isAudioFile(f));
+        // One button for everything: sound files become sound cards, clips video
+        // cards, the rest pictures.
+        const sounds = files.filter(isAudioFile), clips = files.filter((f) => !isAudioFile(f) && isVideoFile(f));
+        const pictures = files.filter((f) => !isAudioFile(f) && !isVideoFile(f));
         if (sounds.length) {
             const m = readMedia(node);
             const room = MAX_SOUNDS - m.audio.length;
             const names = await uploadFiles(sounds.slice(0, Math.max(0, room)));
             for (const file of names) m.audio.push({ file, start: 0, duration: 0, fill: "silence" });
-            if (names.length) { writeMedia(node, m); selAudio = m.audio.length - 1; }
+            if (names.length) { writeMedia(node, m); selAudio = m.audio.length - 1; selVideo = -1; }
             if (sounds.length > room) notice(`Room for ${MAX_SOUNDS} sounds; ${sounds.length - Math.max(0, room)} not added.`);
+        }
+        if (clips.length) {
+            const m = readMedia(node);
+            const room = MAX_VIDEOS - m.video.length;
+            const names = await uploadFiles(clips.slice(0, Math.max(0, room)));
+            for (const file of names) m.video.push({ file, ...NEW_VIDEO });
+            if (names.length) { writeMedia(node, m); selVideo = m.video.length - 1; selAudio = -1; }
+            if (clips.length > room) notice(`Room for ${MAX_VIDEOS} clips; ${clips.length - Math.max(0, room)} not added.`);
         }
         if (pictures.length) {
             const names = await uploadFiles(pictures);
@@ -834,7 +903,7 @@ function buildUI(node) {
                 // The card list drives the socket count, both ways. The arrows still
                 // override it by hand; the override holds until the list changes again.
                 syncCount(node, next.length);
-                if (!sounds.length) selAudio = -1;
+                if (!sounds.length && !clips.length) { selAudio = -1; selVideo = -1; }
             }
         }
         render();
@@ -846,13 +915,16 @@ function buildUI(node) {
         const paths = readPaths(node);
         const media = readMedia(node);
         if (selAudio >= media.audio.length) selAudio = media.audio.length - 1;
+        if (selVideo >= media.video.length) selVideo = media.video.length - 1;
         cards.replaceChildren();
-        counter.textContent = `${paths.length} / ${MAX}` + (media.audio.length ? ` · ${media.audio.length} sound` : "");
+        counter.textContent = `${paths.length} / ${MAX}`
+            + (media.video.length ? ` · ${media.video.length} clip${media.video.length > 1 ? "s" : ""}` : "")
+            + (media.audio.length ? ` · ${media.audio.length} sound` : "");
 
         // No early return on the empty list. It used to return here, which skipped
         // renderPreview/renderPanel — both handle "nothing loaded" correctly, they
         // just never ran, so the last selected image stayed on screen after Clear.
-        if (!paths.length && !media.audio.length) {
+        if (!paths.length && !media.audio.length && !media.video.length) {
             const e = document.createElement("div");
             e.className = "luna-al-empty";
             e.textContent = "Nothing loaded. Press Upload for pictures or a song, or type file names in image_paths below.";
@@ -867,12 +939,12 @@ function buildUI(node) {
 
         paths.forEach((name, i) => {
             const card = document.createElement("div");
-            card.className = "luna-al-card" + (i === selected && selAudio < 0 ? " sel" : "");
+            card.className = "luna-al-card" + (i === selected && selAudio < 0 && selVideo < 0 ? " sel" : "");
             card.draggable = true;
             // Selecting is what makes a nine-image node editable: the resize panel
             // below edits whichever card is selected, so REF2VA references can stay
             // untouched while slots 1 and 2 get conformed.
-            card.onclick = () => { selected = i; selAudio = -1; render(); };
+            card.onclick = () => pick("p", i);
 
             const img = document.createElement("img");
             img.className = "luna-al-thumb";
@@ -941,13 +1013,54 @@ function buildUI(node) {
             cards.appendChild(card);
         });
 
+        // Video cards after the pictures: V1-V3, MiniMax H3's <Video k> in this order.
+        media.video.forEach((c, i) => {
+            const card = document.createElement("div");
+            card.className = "luna-al-card" + (i === selVideo ? " sel" : "");
+            card.style.cursor = "pointer";
+            card.title = `<Video ${i + 1}>\n${c.file}`;
+            card.onclick = () => pick("v", i);
+            const img = document.createElement("img");
+            img.className = "luna-al-vthumb";
+            img.src = stripURL(c.file, 1);
+            const pic = document.createElement("div");
+            pic.className = "luna-al-pic vid";
+            pic.textContent = `V${i + 1}`;
+            const cap = document.createElement("div");
+            cap.className = "luna-al-cap";
+            const dim = document.createElement("div");
+            dim.className = "luna-al-dim";
+            dim.textContent = "reading…";
+            const nm = document.createElement("div");
+            nm.className = "luna-al-name";
+            nm.textContent = c.file;
+            cap.append(dim, nm);
+            const x = document.createElement("div");
+            x.className = "luna-al-x";
+            x.textContent = "✕";
+            x.title = "Remove";
+            x.onclick = (ev) => {
+                ev.stopPropagation();
+                const m = readMedia(node);
+                m.video.splice(i, 1);
+                writeMedia(node, m);
+                if (selVideo >= m.video.length) selVideo = m.video.length - 1;
+                render();
+            };
+            card.append(img, pic, x, cap);
+            cards.appendChild(card);
+            mediaInfo(c.file).then((mi) => {
+                dim.textContent = `${(mi.duration || 0).toFixed(1)} s · ${+(mi.fps || 0).toFixed(2)} fps${mi.audio ? "" : " · no sound"}`;
+            }).catch(() => { dim.textContent = "cannot be read"; });
+        });
+
         // Sound cards after the pictures. Not draggable: they are numbered on their
         // own (A1 is the song), and pictures never trade places with them.
         media.audio.forEach((c, i) => {
             const card = document.createElement("div");
             card.className = "luna-al-card snd" + (i === selAudio ? " sel" : "");
             card.title = `Sound ${i + 1}${i === 0 ? " — the song on the audio output" : ""}\n${c.file}`;
-            card.onclick = () => { selAudio = i; render(); };
+            card.onclick = () => pick("a", i);
             const cv = document.createElement("canvas");
             cv.className = "luna-al-snd";
             const pic = document.createElement("div");
@@ -988,6 +1101,7 @@ function buildUI(node) {
         renderPreview();
         renderPanel();
         renderAudio();
+        renderVideo();
 
         // The widget's getHeight depends on how many cards there are, so a redraw
         // has to follow any change to the list or the node keeps its old height.
@@ -996,7 +1110,7 @@ function buildUI(node) {
 
     function renderPreview() {
         const paths = readPaths(node);
-        if (selAudio >= 0) { preview.style.display = "none"; return; }
+        if (selAudio >= 0 || selVideo >= 0) { preview.style.display = "none"; return; }
         if (!paths.length) {
             // Drop the picture as well as hiding the box: leaving the src set kept
             // the removed image decoded, and the dataset guard below would then
@@ -1028,8 +1142,8 @@ function buildUI(node) {
 
     function renderPanel() {
         panel.replaceChildren();
-        panel.style.display = selAudio >= 0 ? "none" : "";
-        if (selAudio >= 0) return;
+        panel.style.display = selAudio >= 0 || selVideo >= 0 ? "none" : "";
+        if (selAudio >= 0 || selVideo >= 0) return;
         const paths = readPaths(node);
         if (!paths.length) return;
         if (selected >= paths.length) selected = 0;
@@ -1465,8 +1579,213 @@ function buildUI(node) {
         };
     }
 
+    /* --------------------------------------------------------- clip editor */
+
+    function renderVideo() {
+        const vplayer = ved.querySelector("video");
+        if (vplayer) { vplayer.pause(); vplayer.removeAttribute("src"); vplayer.load(); }
+        const media = readMedia(node);
+        if (selVideo < 0 || !media.video[selVideo]) {
+            ved.style.display = "none";
+            ved.replaceChildren();
+            return;
+        }
+        ved.style.display = "";
+        const idx = selVideo, card = { ...NEW_VIDEO, ...media.video[idx] };
+        let start = Number(card.start) || 0, frames = Math.max(1, Number(card.frames) || 124), mi = null;
+        const ww = wiredNumber("width", () => null), wh = wiredNumber("height", () => null);
+
+        ved.innerHTML = `
+            <div class="luna-al-ahead"><b>&lt;Video ${idx + 1}&gt;</b><span class="nm"></span><span class="sp"></span><span class="meta">reading the clip…</span>
+              <div class="luna-al-play" title="Play the clip window">▶</div></div>
+            <video class="luna-al-video" muted playsinline preload="metadata"></video>
+            <div class="luna-al-zlbl"><span>The whole clip · drag the window to choose the part</span><span class="zr"></span></div>
+            <div class="luna-al-strip"><div class="luna-al-win"><div class="h l"></div><div class="h r"></div><div class="tag"></div></div></div>
+            <div class="luna-al-ruler"></div>
+            <div class="luna-al-nums">
+              <span class="l">Start</span><div class="luna-al-nf"><span class="luna-al-nud" data-n="-1" title="One source frame earlier">◀</span><input class="st"><span class="luna-al-nud" data-n="1" title="One source frame later">▶</span></div>
+              <span class="l">Length</span><div class="luna-al-nf"><span class="luna-al-nud" data-f="-1" title="Shorter">−</span><input class="fr" style="width:56px"><span class="luna-al-nud" data-f="1" title="Longer">+</span><span class="luna-al-lock fl"></span></div>
+            </div>
+            <div class="luna-al-sect">Load settings</div>
+            <div class="luna-al-row"><div class="luna-al-lbl">Frame rate</div><div class="luna-al-seg fps"></div></div>
+            <div class="luna-al-row"><div class="luna-al-lbl">Frames</div><div class="luna-al-seg cnt"></div></div>
+            <div class="luna-al-row"><div class="luna-al-lbl">Size</div><div class="luna-al-seg size"></div></div>
+            <div class="luna-al-row fitrow"><div class="luna-al-lbl">Fit</div><div class="luna-al-seg fit"></div></div>
+            <div class="luna-al-row"><div class="luna-al-lbl">Every Nth</div><div class="luna-al-seg nth"></div></div>
+            <div class="luna-al-row"><div class="luna-al-lbl">Soundtrack</div><div class="luna-al-seg snd"></div></div>
+            <div class="luna-al-row"><div class="luna-al-lbl">Precision</div><div class="luna-al-seg prec"></div></div>
+            <div class="luna-al-astat"></div>`;
+        const $ = (s) => ved.querySelector(s);
+        $(".nm").textContent = card.file;
+        const video = $("video"), strip = $(".luna-al-strip"), win = $(".luna-al-win");
+        const iSt = $(".st"), iFr = $(".fr");
+        video.src = soundURL(card.file);
+        strip.style.backgroundImage = `url("${stripURL(card.file, 16)}")`;
+
+        const outFps = () => card.fps === "target" ? H3_FPS : card.fps === "source" ? (mi?.fps || H3_FPS) : Number(card.fps);
+        const dur = () => mi?.duration || 0;
+        const clipS = () => frames / outFps();
+        const outSize = () => {
+            if (!mi) return [0, 0];
+            if (card.size === "canvas" && ww.value > 0 && wh.value > 0) return [ww.value, wh.value];
+            if (card.size === "source") return [mi.width, mi.height];
+            // Same rule as media_io._target_size: scale the short edge to 768, never
+            // up, then even dimensions.
+            const s = Math.min(1, 768 / Math.min(mi.width, mi.height));
+            const ev = (v) => Math.max(2, v - (v % 2));
+            return [ev(Math.round(mi.width * s)), ev(Math.round(mi.height * s))];
+        };
+        const clampStart = (t) => Math.max(0, Math.min(t, Math.max(0, dur() - Math.min(clipS(), dur()))));
+        const snapCount = (n) => card.count === "target" ? nearestH3Frames(n) : Math.max(1, Math.round(n));
+
+        const seg = (host, opts, cur, pickOpt) => {
+            host.replaceChildren();
+            for (const [val, text] of opts) {
+                const o = document.createElement("div");
+                o.className = "luna-al-opt" + (String(val) === String(cur) ? " on" : "");
+                o.textContent = text;
+                o.onclick = () => pickOpt(val);
+                host.appendChild(o);
+            }
+        };
+        const opts = () => {
+            seg($(".fps"), [["target", "H3 (24)"], ["source", `Source${mi?.fps ? ` (${+mi.fps.toFixed(2)})` : ""}`], [24, "24"], [25, "25"], [30, "30"]], card.fps, (v) => commit({ fps: v }));
+            seg($(".cnt"), [["target", "H3 grid (17k+5)"], ["free", "Free"]], card.count, (v) => {
+                card.count = v;
+                commit({ count: v, frames: snapCount(frames) });
+            });
+            seg($(".size"), [["canvas", ww.wired && wh.wired ? "Match canvas" : "Match canvas (not wired)"], ["edge", "768 short edge"], ["source", "Source"]], card.size, (v) => commit({ size: v }));
+            seg($(".fit"), [["crop", "Crop to fill"], ["pad", "Pad"], ["stretch", "Stretch"]], card.fit, (v) => commit({ fit: v }));
+            seg($(".nth"), [[1, "All"], [2, "2nd"], [3, "3rd"], [4, "4th"]], card.nth, (v) => commit({ nth: v }));
+            seg($(".snd"), [["keep", mi && !mi.audio ? "Keep (none in file)" : "Keep"], ["drop", "Drop"]], card.sound, (v) => commit({ sound: v }));
+            seg($(".prec"), [["fp16", "fp16 (half the memory)"], ["fp32", "fp32"]], card.precision, (v) => commit({ precision: v }));
+            $(".fitrow").style.display = card.size === "canvas" ? "" : "none";
+        };
+
+        function commit(patch = {}) {
+            const m = readMedia(node);
+            if (!m.video[idx]) return;
+            m.video[idx] = { ...m.video[idx], start: +start.toFixed(6), frames, ...patch };
+            writeMedia(node, m);
+            render();
+        }
+
+        function draw() {
+            const fps = outFps(), T = dur(), s = clipS();
+            iSt.value = clock(start);
+            iFr.value = String(frames);
+            $(".fl").textContent = `${s.toFixed(2)} s at ${+fps.toFixed(3)} fps`;
+            if (T) {
+                win.style.left = `${Math.min(start, T) / T * 100}%`;
+                win.style.width = `${Math.max(0.6, Math.min(s, Math.max(0, T - start)) / T * 100)}%`;
+                $(".tag").textContent = `${frames} f · ${s.toFixed(2)} s`;
+                $(".zr").textContent = `${clock(start)} – ${clock(start + s)}`;
+            }
+            const [w, h] = outSize();
+            const kept = Math.ceil(frames / Math.max(1, card.nth));
+            const gb = w && h ? kept * w * h * 3 * (card.precision === "fp16" ? 2 : 4) / 1024 ** 3 : 0;
+            let msg = w ? `Will decode <b>${kept} frames at ${w}×${h}</b> = <b>${gb.toFixed(2)} GB</b> as ${card.precision}.` : "";
+            if (gb > MEMORY_CAP_GB) msg += ` <span class="w">That is more than the ${MEMORY_CAP_GB} GB this node allows; the run will refuse it.</span>`;
+            if (card.size === "canvas" && !(ww.value > 0 && wh.value > 0))
+                msg += `<br><span class="w">Match canvas needs <b>width</b> and <b>height</b> wired; until then the clip keeps its shape at a 768 short edge.</span>`;
+            if (T && start + s > T + 1e-3)
+                msg += `<br><span class="w">The clip ends ${(start + s - T).toFixed(2)} s before the window does; the run takes what is there${card.count === "target" ? ", cut down to the H3 grid" : ""}.</span>`;
+            if (mi) {
+                const how = mi.fps && Math.abs(fps - mi.fps) > 0.01 ? (fps < mi.fps ? "drops frames" : "repeats frames") : "unchanged";
+                msg += `<br>${+mi.fps.toFixed(2)} → ${+fps.toFixed(2)} fps (${how}). MiniMax H3 sees it as <b>&lt;Video ${idx + 1}&gt;</b>${card.sound === "keep" && mi.audio ? ", its sound as the &lt;Audio&gt; right before it" : ""}.`;
+            }
+            $(".luna-al-astat").innerHTML = msg;
+        }
+
+        const ruler = () => {
+            const T = dur(), r = $(".luna-al-ruler");
+            r.replaceChildren();
+            if (!T) return;
+            const stp = T > 120 ? 30 : T > 40 ? 10 : T > 15 ? 5 : T > 6 ? 2 : 1;
+            for (let t = 0; t <= T + 1e-6; t += stp) {
+                const sp = document.createElement("span");
+                sp.style.left = `${t / T * 100}%`;
+                sp.textContent = `${t}s`;
+                r.appendChild(sp);
+            }
+        };
+
+        opts();
+        draw();
+        mediaInfo(card.file).then((info) => {
+            if (!ved.contains(win)) return;
+            mi = info;
+            $(".meta").textContent = `${info.width}×${info.height} · ${+(info.fps || 0).toFixed(2)} fps · ${(info.duration || 0).toFixed(2)} s · ${info.audio ? "sound" : "no sound"}`;
+            opts(); ruler();
+            setTimeout(draw, 0);
+        }).catch(() => { $(".meta").textContent = "this clip cannot be read"; });
+
+        let drag = null;
+        win.addEventListener("pointerdown", (e) => {
+            if (!mi) return;
+            const edge = e.target.classList.contains("h") ? (e.target.classList.contains("l") ? "l" : "r") : "m";
+            drag = { edge, x: e.clientX, s: start, f: frames };
+            win.setPointerCapture(e.pointerId);
+            e.preventDefault();
+        });
+        win.addEventListener("pointermove", (e) => {
+            if (!drag) return;
+            const dt = (e.clientX - drag.x) / strip.getBoundingClientRect().width * dur();
+            if (drag.edge === "m") start = clampStart(drag.s + dt);
+            else if (drag.edge === "r") frames = Math.max(1, Math.round(drag.f + dt * outFps()));
+            else {
+                const s0 = Math.max(0, Math.min(drag.s + drag.f / outFps() - 0.05, drag.s + dt));
+                frames = Math.max(1, Math.round(drag.f - (s0 - drag.s) * outFps()));
+                start = s0;
+            }
+            draw();
+        });
+        const end = () => {
+            if (!drag) return;
+            const resized = drag.edge !== "m";
+            drag = null;
+            if (resized) frames = snapCount(frames);
+            commit();
+        };
+        win.addEventListener("pointerup", end);
+        win.addEventListener("pointercancel", end);
+        strip.addEventListener("pointerdown", (e) => {
+            if (!mi || win.contains(e.target)) return;
+            const r = strip.getBoundingClientRect();
+            start = clampStart((e.clientX - r.left) / r.width * dur() - clipS() / 2);
+            commit();
+        });
+        ved.querySelectorAll("[data-n]").forEach((b) => {
+            b.onclick = () => { start = clampStart(start + Number(b.dataset.n) / (mi?.fps || H3_FPS)); commit(); };
+        });
+        ved.querySelectorAll("[data-f]").forEach((b) => {
+            b.onclick = () => {
+                frames = card.count === "target" ? stepH3Frames(frames, Number(b.dataset.f)) : Math.max(1, frames + Number(b.dataset.f));
+                commit();
+            };
+        });
+        iSt.onchange = () => { const v = parseClock(iSt.value); if (v != null) start = clampStart(v); commit(); };
+        iFr.onchange = () => { const v = Math.round(Number(iFr.value)); if (v >= 1) frames = snapCount(v); commit(); };
+        for (const inp of [iSt, iFr]) inp.addEventListener("keydown", (e) => { if (e.key === "Enter") inp.blur(); });
+
+        let vt = 0;
+        $(".luna-al-play").onclick = () => {
+            if (!mi) return;
+            if (!video.paused) { video.pause(); clearTimeout(vt); $(".luna-al-play").textContent = "▶"; return; }
+            video.currentTime = start;
+            video.play().catch(() => notice("The browser would not start playback."));
+            $(".luna-al-play").textContent = "■";
+            clearTimeout(vt);
+            vt = setTimeout(() => { video.pause(); $(".luna-al-play").textContent = "▶"; }, Math.min(clipS(), dur() - start) * 1000);
+        };
+        video.addEventListener("loadedmetadata", () => { try { video.currentTime = start; } catch { /* not seekable yet */ } });
+    }
+
+    const videoHeight = () => 572;   // added up from its rows, like AUDIO_H; never measured
+
     return { root, render, selectCard: (i) => { selected = i; renderPanel(); }, natural,
-             audioOpen: () => selAudio >= 0, audioExtraRows };
+             audioOpen: () => selAudio >= 0, audioExtraRows,
+             videoOpen: () => selVideo >= 0, videoHeight };
 }
 
 /* ---------------------------------------------------------------- register */
@@ -1497,9 +1816,13 @@ app.registerExtension({
             const AUDIO_H = 360;
             const cardsHeight = () => {
                 const list = readPaths(this);
-                const sounds = readMedia(this).audio.length;
+                const md = readMedia(this), sounds = md.audio.length + md.video.length;
                 const cols = Math.max(1, Math.floor((this.size[0] - 24) / CELL));
                 const rows = Math.max(1, Math.ceil((list.length + sounds) / cols));
+                if (ui.videoOpen()) {
+                    const h = ui.videoHeight();
+                    return Math.min(MAXH + h, BAR + PAD + rows * CELL + h);
+                }
                 if (ui.audioOpen()) {
                     const h = AUDIO_H + ui.audioExtraRows() * 28;   // Position, then Shot + Overlap in shot mode
                     return Math.min(MAXH + h, BAR + PAD + rows * CELL + h);
