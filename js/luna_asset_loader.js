@@ -167,6 +167,17 @@ const CSS = `
                  background-size:100% 100%; background-repeat:no-repeat; overflow:hidden; cursor:crosshair; }
 .luna-al-sect { font-size:10.5px; color:var(--luna-accent); font-weight:600; margin-top:2px; }
 
+/* The three rows (v3): Pictures, Clips, Sounds — each kind on its own. */
+.luna-al-sec { display:flex; flex-direction:column; gap:6px; border-top:1px solid var(--luna-border); padding-top:6px; }
+.luna-al-sech { display:flex; align-items:center; gap:8px; font-size:11.5px; font-weight:600; }
+.luna-al-sec.k-p .luna-al-sech .tt { color:var(--luna-accent); }
+.luna-al-sec.k-v .luna-al-sech .tt { color:#d98a6a; }
+.luna-al-sec.k-a .luna-al-sech .tt { color:#e07bb4; }
+.luna-al-sech .n { color:var(--luna-muted); font-weight:400; }
+.luna-al-sech .sp { flex:1 1 auto; }
+.luna-al-sech .add { padding:2px 9px; font-weight:400; }
+.luna-al-sec .luna-al-empty { padding:4px 2px; font-size:10.5px; }
+
 /* The shot timeline (v3): the video being generated, one lane per kind. */
 .luna-al-tl { border:1px solid var(--luna-border); border-radius:8px; background:var(--luna-bg); padding:7px;
               display:flex; flex-direction:column; gap:4px; }
@@ -604,6 +615,7 @@ const parseClock = (txt) => {
 // file is already in the input folder, so nothing is decoded on the server just
 // to draw a picture of it (the same split Pixaroma's Load Audio makes).
 const PEAKS_PER_S = 100;
+const ZOOM_S = 2;   // the song zoom strip shows the start of the window ± this many seconds
 const _peaks = new Map();     // file -> Promise<{peaks, duration, sampleRate, channels}>
 function loadPeaks(file) {
     if (_peaks.has(file)) return _peaks.get(file);
@@ -654,6 +666,11 @@ function drawWave(cv, info, t0, t1, a, b, opts = {}) {
         const tm = (ta + tb) / 2, h = Math.max(1, mx * (H / 2 - 2));
         g.fillStyle = tm >= a && tm <= b ? (opts.color || "#e07bb4") : "#5d616e";
         g.fillRect(x, mid - h, Math.max(1, step - 0.6), h * 2);
+    }
+    if (opts.mark != null) {   // the cut: where the window begins
+        const x = (opts.mark - t0) / span * W;
+        g.fillStyle = "#e0a458";
+        g.fillRect(Math.round(x) - 1, 0, 2, H);
     }
 }
 
@@ -1085,7 +1102,41 @@ function buildUI(node) {
     ced.className = "luna-al-ved";
     ced.style.display = "none";
     for (const ev of ["pointerdown", "keydown", "wheel"]) ced.addEventListener(ev, (e) => e.stopPropagation());
-    root.append(bar, cards, tl, preview, panel, aed, ved, ced);
+    // Three rows, one per kind (Peter, 2026-10-16: "different timelines for image,
+    // video and audio" — chose "Three rows"): each with its own + add, its own
+    // cards, and its editor opening right under it. The shot timeline sits below.
+    const vcards = document.createElement("div");
+    vcards.className = "luna-al-cards";
+    const acards = document.createElement("div");
+    acards.className = "luna-al-cards";
+    const ACCEPT = {
+        p: "image/*",
+        v: "video/*,.mp4,.mov,.mkv,.webm,.avi,.m4v",
+        a: "audio/*,.mp3,.wav,.flac,.ogg,.opus,.m4a,.aac",
+    };
+    const heads = {};
+    const section = (kind, title, grid, editors) => {
+        const sec = document.createElement("div");
+        sec.className = `luna-al-sec k-${kind}`;
+        const h = document.createElement("div");
+        h.className = "luna-al-sech";
+        h.innerHTML = `<span class="tt"></span><span class="n"></span><span class="sp"></span>`;
+        h.querySelector(".tt").textContent = title;
+        const add = document.createElement("div");
+        add.className = "luna-al-btn add";
+        add.textContent = "+ add";
+        add.title = `Add ${title.toLowerCase()}`;
+        add.onclick = () => { picker.accept = ACCEPT[kind]; picker.click(); };
+        h.appendChild(add);
+        heads[kind] = h.querySelector(".n");
+        sec.append(h, grid, ...editors);
+        return sec;
+    };
+    root.append(bar,
+        section("p", "Pictures", cards, [preview, panel]),
+        section("v", "Clips", vcards, [ved, ced]),
+        section("a", "Sounds", acards, [aed]),
+        tl);
 
     let selected = 0;                 // which card the resize panel edits
     let selAudio = -1;                // which sound card the song editor edits; -1 = none
@@ -1103,7 +1154,8 @@ function buildUI(node) {
 
     const picker = document.createElement("input");
     picker.type = "file";
-    picker.accept = "image/*,audio/*,.mp3,.wav,.flac,.ogg,.opus,.m4a,.aac";
+    const ACCEPT_ALL = "image/*,audio/*,video/*,.mp3,.wav,.flac,.ogg,.opus,.m4a,.aac,.mp4,.mov,.mkv,.webm,.avi,.m4v";
+    picker.accept = ACCEPT_ALL;
     picker.multiple = true;
     picker.style.display = "none";
     root.appendChild(picker);
@@ -1200,6 +1252,7 @@ function buildUI(node) {
     picker.onchange = async () => {
         const files = Array.from(picker.files || []);
         picker.value = "";
+        picker.accept = ACCEPT_ALL;      // a row's + add narrowed it for one pick
         if (!files.length) return;
         // One button for everything: sound files become sound cards, clips video
         // cards, the rest pictures.
@@ -1243,19 +1296,24 @@ function buildUI(node) {
         if (selAudio >= media.audio.length) selAudio = media.audio.length - 1;
         if (selVideo >= media.video.length) selVideo = media.video.length - 1;
         cards.replaceChildren();
-        counter.textContent = `${paths.length} / ${MAX}`
-            + (media.video.length ? ` · ${media.video.length} clip${media.video.length > 1 ? "s" : ""}` : "")
-            + (media.audio.length ? ` · ${media.audio.length} sound` : "");
+        vcards.replaceChildren();
+        acards.replaceChildren();
+        counter.textContent = "";
+        heads.p.textContent = `${paths.length} / ${MAX}`;
+        heads.v.textContent = `${media.video.length} / ${MAX_VIDEOS}` + (media.continuation?.on ? " · ↺" : "");
+        heads.a.textContent = `${media.audio.length} / ${MAX_SOUNDS}`;
 
-        // No early return on the empty list. It used to return here, which skipped
-        // renderPreview/renderPanel — both handle "nothing loaded" correctly, they
-        // just never ran, so the last selected image stayed on screen after Clear.
-        if (!paths.length && !media.audio.length && !media.video.length) {
+        // No early return on an empty row: renderPreview/renderPanel handle "nothing
+        // loaded" themselves, and skipping them once left a removed picture on screen.
+        const empty = (grid, text) => {
             const e = document.createElement("div");
             e.className = "luna-al-empty";
-            e.textContent = "Nothing loaded. Press Upload for pictures or a song, or type file names in image_paths below.";
-            cards.appendChild(e);
-        }
+            e.textContent = text;
+            grid.appendChild(e);
+        };
+        if (!paths.length) empty(cards, "No pictures. + add, or type file names in image_paths (Fields).");
+        if (!media.video.length && !media.continuation?.on) empty(vcards, "No clips. + add a video, or ↺ Continue from the previous shot.");
+        if (!media.audio.length) empty(acards, "No sounds. + add a song — sound 1 drives the shot.");
         if (paths.length > MAX) {
             const warn = document.createElement("div");
             warn.className = "luna-al-warn";
@@ -1371,7 +1429,7 @@ function buildUI(node) {
             cap.innerHTML = `<div class="luna-al-dim">${n.shot1 ? "shot 1: none" : c.take === "last" ? "last frame" : `last ${n.frames} frames`}</div><div class="luna-al-name"></div>`;
             cap.querySelector(".luna-al-name").textContent = c.from === "input" ? "previous_frames input" : c.from === "file" ? (c.file || "pick a file") : `newest in output/${c.folder || ""}`;
             card.append(face, pic, cap);
-            cards.appendChild(card);
+            vcards.appendChild(card);
         }
 
         // Video cards after the pictures: V1-V3, MiniMax H3's <Video k> in this order.
@@ -1409,7 +1467,7 @@ function buildUI(node) {
                 render();
             };
             card.append(img, pic, x, cap);
-            cards.appendChild(card);
+            vcards.appendChild(card);
             mediaInfo(c.file).then((mi) => {
                 dim.textContent = `${(mi.duration || 0).toFixed(1)} s · ${+(mi.fps || 0).toFixed(2)} fps${mi.audio ? "" : " · no sound"}`;
                 // A silent clip shifts the <Audio n> numbers: redraw the tags now that it is known.
@@ -1452,7 +1510,7 @@ function buildUI(node) {
                 render();
             };
             card.append(cv, pic, x, cap);
-            cards.appendChild(card);
+            acards.appendChild(card);
             loadPeaks(c.file).then((info) => {
                 dim.textContent = `${clock(info.duration).replace(/\.\d+$/, "")} · ${(info.sampleRate / 1000).toFixed(1)} kHz`;
                 const dur = c.duration > 0 ? c.duration : info.duration - c.start;
@@ -1866,7 +1924,7 @@ function buildUI(node) {
               <div class="luna-al-play" title="Play the window">▶</div></div>
             <div class="luna-al-wave"><canvas></canvas><div class="luna-al-win"><div class="h l"></div><div class="h r"></div><div class="tag"></div></div><div class="luna-al-ph"></div></div>
             <div class="luna-al-ruler"></div>
-            <div class="luna-al-zlbl"><span>Zoom on the window (± 1 s) · drag to fine-tune the start</span><span class="zr"></span></div>
+            <div class="luna-al-zlbl"><span>Around the start of the window (± 2 s) · drag to place the cut exactly</span><span class="zr"></span></div>
             <div class="luna-al-zoom"><canvas></canvas><div class="luna-al-ph"></div></div>
             <div class="luna-al-nums">
               <span class="l stl">Start</span><div class="luna-al-nf"><span class="luna-al-nud" data-n="-1" title="0.1 s earlier">◀</span><input class="st"><span class="luna-al-nud" data-n="1" title="0.1 s later">▶</span></div>
@@ -1972,8 +2030,10 @@ function buildUI(node) {
                 const cv = wave.querySelector("canvas");
                 drawWave(cv, info, 0, T, a, a + e);
                 if (byShot && step() > 0) drawShotStrip(cv, T, N, n, e);
-                const z0 = a - 1, z1 = a + e + 1;
-                drawWave(zoom.querySelector("canvas"), info, z0, z1, a, a + e, { grid: true, step: 1 });
+                // Only the cut, not the whole window: a 24 s window "zoomed" was just the
+                // window again (Peter, 2026-10-16: "i dont really understand the principle").
+                const z0 = a - ZOOM_S, z1 = a + ZOOM_S;
+                drawWave(zoom.querySelector("canvas"), info, z0, z1, a, a + e, { grid: true, step: 1, mark: a });
                 $(".zr").textContent = `${clock(Math.max(0, z0))} – ${clock(z1)}`;
             }
             const last = _lastSong.get(node.id);
@@ -2079,7 +2139,7 @@ function buildUI(node) {
         zoom.addEventListener("pointerdown", (e) => { if (!info) return; zd = { x: e.clientX, a: winStart() }; zoom.setPointerCapture(e.pointerId); });
         zoom.addEventListener("pointermove", (e) => {
             if (!zd) return;
-            setWin(zd.a - (e.clientX - zd.x) / zoom.getBoundingClientRect().width * (eff() + 2));
+            setWin(zd.a - (e.clientX - zd.x) / zoom.getBoundingClientRect().width * (2 * ZOOM_S));
             draw();
         });
         const zEnd = () => { if (zd) { zd = null; commit(); } };
@@ -2129,7 +2189,7 @@ function buildUI(node) {
                 const T = total(), W = wave.getBoundingClientRect().width, Z = zoom.getBoundingClientRect().width;
                 phW.style.display = phZ.style.display = "block";
                 phW.style.left = `${t / T * 100}%`;
-                phZ.style.left = `${(t - (a - 1)) / (eff() + 2) * 100}%`;
+                phZ.style.left = `${(t - (a - ZOOM_S)) / (2 * ZOOM_S) * 100}%`;
                 playRaf = requestAnimationFrame(tick);
             };
             playRaf = requestAnimationFrame(tick);
@@ -2459,38 +2519,43 @@ app.registerExtension({
             // ruler 12, zoom label 14, zoom 40, two number rows 52, two option
             // rows 50, status 42, gaps and padding 66). Arithmetic, never measured.
             const AUDIO_H = 360;
+            // Three rows (heading + cards, or a one-line note when empty), the one open
+            // editor, and the shot timeline. Arithmetic on node.size, never measured
+            // from the rendered layout. The part heights below were measured ONCE in
+            // frontend 1.55.17 (2026-10-16) and are constants from then on.
+            const GRID_SIDE = 35;          // DOM widget margins + root padding, horizontally
+            const CARD_MIN = 112, CARD_GAP = 8;
+            const ROOT = 12 + 27 + 4 * 6;  // root padding, toolbar, gaps between bar/rows/timeline
+            const SEC = 7 + 21 + 6;        // row border + padding, heading, gap to the cards
+            const EMPTY = 26, PANEL = 125, AUDIO_BASE = 315, VIDEO_BASE = 598, CONT = 250, TIMELINE = 194;
+            const gridH = (n) => {
+                if (!n) return EMPTY;
+                const gw = Math.max(CARD_MIN, this.size[0] - GRID_SIDE);
+                const cols = Math.max(1, Math.floor((gw + CARD_GAP) / (CARD_MIN + CARD_GAP)));
+                const card = (gw - (cols - 1) * CARD_GAP) / cols + 2;   // square cards + border
+                const rows = Math.ceil(n / cols);
+                return rows * card + (rows - 1) * CARD_GAP + 4;
+            };
             const cardsHeight = () => {
                 const list = readPaths(this);
-                const md = readMedia(this), sounds = md.audio.length + md.video.length + (md.continuation?.on ? 1 : 0);
-                const cols = Math.max(1, Math.floor((this.size[0] - 24) / CELL));
-                const rows = Math.max(1, Math.ceil((list.length + sounds) / cols));
-                const tlh = ui.timelineHeight();
-                if (ui.contOpen()) {
-                    const h = 250 + tlh;   // head, strip, label, four rows, status — added up, never measured
-                    return Math.min(MAXH + h, BAR + PAD + rows * CELL + h);
-                }
-                if (ui.videoOpen()) {
-                    const h = ui.videoHeight() + tlh;
-                    return Math.min(MAXH + h, BAR + PAD + rows * CELL + h);
-                }
-                if (ui.audioOpen()) {
-                    const h = AUDIO_H + ui.audioExtraRows() * 28 + tlh;   // Position, Shot + Overlap, Role, At frame
-                    return Math.min(MAXH + h, BAR + PAD + rows * CELL + h);
-                }
-                // The resize panel only exists once there is something to resize,
-                // and grows a row when a mode or a ratio is chosen (and with the role rows).
-                let panel = 0;
-                if (list.length) {
+                const md = readMedia(this);
+                const rowsH = 3 * SEC + gridH(list.length) + gridH(md.video.length + (md.continuation?.on ? 1 : 0))
+                            + gridH(md.audio.length);
+                const tlh = ui.timelineHeight() ? TIMELINE : 0;
+                let editor = 0;
+                if (ui.contOpen()) editor = 6 + CONT;
+                else if (ui.videoOpen()) editor = 6 + VIDEO_BASE + (ui.videoHeight() - 572);   // + Role, + At frame
+                else if (ui.audioOpen()) editor = 6 + AUDIO_BASE + ui.audioExtraRows() * 28;   // Position, Shot + Overlap, Role, At frame
+                else if (list.length) {
+                    // The picture preview and its resize panel, which grows a row when a
+                    // mode or a ratio is chosen, and with the At frame row of a keyframe.
                     const st = itemAt(this, 0);
-                    const key = readMedia(this).pictures.some((p) => p?.role === "key");
-                    panel = 118 + (st.mode !== "off" ? 26 : 0) + (st.ratio ? 26 : 0) + 28 + (key ? 28 : 0);
+                    const key = md.pictures.some((p) => p?.role === "key");
+                    editor = 6 + previewH(this) + 6 + PANEL + (st.mode !== "off" ? 26 : 0) + (st.ratio ? 26 : 0) + (key ? 28 : 0);
                 }
-                // The preview is a fixed block, so it stays arithmetic like the
-                // rest — nothing here is measured from the rendered layout.
-                const pv = list.length ? previewH(this) + 6 : 0;
-                return Math.min(MAXH + tlh, Math.max(MINH, BAR + PAD + rows * CELL + pv + panel + tlh));
-            };
-            const w = this.addDOMWidget("luna_asset_cards", "div", ui.root, {
+                // + 16: the calibration came within ±16 px; spare space beats clipping.
+                return Math.max(MINH, ROOT + rowsH + editor + tlh + 16);
+            };            const w = this.addDOMWidget("luna_asset_cards", "div", ui.root, {
                 serialize: false,
                 hideOnZoom: false,
                 getHeight: cardsHeight,
