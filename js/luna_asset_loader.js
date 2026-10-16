@@ -156,6 +156,20 @@ const CSS = `
 .luna-al-astat b { color:var(--luna-text); font-weight:600; }
 .luna-al-astat .w { color:#f0a49a; }
 
+/* Song zoom (v3): − + Fit above the waveform, an overview bar under it when zoomed. */
+.luna-al-ztools { display:flex; align-items:center; gap:4px; font-size:10.5px; color:var(--luna-muted); }
+.luna-al-ztools .l { margin-right:2px; }
+.luna-al-ztools .zfit { width:auto; padding:0 6px; }
+.luna-al-ztools .zx { margin-left:4px; color:var(--luna-text); }
+.luna-al-ztools .sp { flex:1 1 auto; }
+.luna-al-ovw { position:relative; height:10px; border-radius:4px; background:#101116; cursor:pointer; overflow:hidden; }
+.luna-al-ovw .vw { position:absolute; top:0; bottom:0; background:#ffffff1f; border:1px solid #8b8e99; border-radius:3px; box-sizing:border-box; cursor:grab; }
+.luna-al-ovw .wn { position:absolute; top:3px; bottom:3px; background:#e07bb4cc; pointer-events:none; }
+/* Long readouts ("577 frames at 24 fps · from …") wrap instead of running past the edge. */
+.luna-al-nums { grid-template-columns:auto minmax(0, max-content) auto minmax(0, 1fr) !important; }
+.luna-al-nf { flex-wrap:wrap; min-width:0; }
+.luna-al-lock { white-space:normal !important; min-width:0; }
+
 /* Video cards and the clip editor (v3). Orange marks clips, pink sound. */
 .luna-al-pic.vid { background:#d98a6a; }
 .luna-al-vthumb { display:block; width:100%; aspect-ratio:1/1; object-fit:cover; background:var(--luna-bg); }
@@ -615,7 +629,8 @@ const parseClock = (txt) => {
 // file is already in the input folder, so nothing is decoded on the server just
 // to draw a picture of it (the same split Pixaroma's Load Audio makes).
 const PEAKS_PER_S = 100;
-const ZOOM_S = 2;   // the song zoom strip shows the start of the window ± this many seconds
+const MIN_VIEW_S = 2;           // the song zoom stops at 2 s across the waveform
+const _songView = new Map();     // song file -> the zoomed part {v0, v1}, kept across re-renders
 const _peaks = new Map();     // file -> Promise<{peaks, duration, sampleRate, channels}>
 function loadPeaks(file) {
     if (_peaks.has(file)) return _peaks.get(file);
@@ -1922,10 +1937,10 @@ function buildUI(node) {
         aed.innerHTML = `
             <div class="luna-al-ahead"><b>A${idx + 1}</b><span class="nm"></span><span class="sp"></span><span class="meta">reading the song…</span>
               <div class="luna-al-play" title="Play the window">▶</div></div>
+            <div class="luna-al-ztools"><span class="l">Zoom</span><span class="luna-al-nud" data-z="out" title="Zoom out">−</span><span class="luna-al-nud" data-z="in" title="Zoom in (or the mouse wheel over the song)">+</span><span class="luna-al-nud zfit" data-z="fit" title="The whole song">Fit</span><span class="zx"></span><span class="sp"></span><span class="zr"></span></div>
             <div class="luna-al-wave"><canvas></canvas><div class="luna-al-win"><div class="h l"></div><div class="h r"></div><div class="tag"></div></div><div class="luna-al-ph"></div></div>
             <div class="luna-al-ruler"></div>
-            <div class="luna-al-zlbl"><span>Around the start of the window (± 2 s) · drag to place the cut exactly</span><span class="zr"></span></div>
-            <div class="luna-al-zoom"><canvas></canvas><div class="luna-al-ph"></div></div>
+            <div class="luna-al-ovw" title="The whole song; the light box is what the waveform shows — drag it to scroll"><div class="vw"></div><div class="wn"></div></div>
             <div class="luna-al-nums">
               <span class="l stl">Start</span><div class="luna-al-nf"><span class="luna-al-nud" data-n="-1" title="0.1 s earlier">◀</span><input class="st"><span class="luna-al-nud" data-n="1" title="0.1 s later">▶</span></div>
               <span class="l">Duration</span><div class="luna-al-nf"><input class="du"><span class="luna-al-lock dl"></span></div>
@@ -1941,8 +1956,21 @@ function buildUI(node) {
             <div class="luna-al-astat"></div>`;
         const $ = (s) => aed.querySelector(s);
         $(".nm").textContent = card.file;
-        const wave = $(".luna-al-wave"), win = $(".luna-al-win"), zoom = $(".luna-al-zoom");
-        const [phW, phZ] = aed.querySelectorAll(".luna-al-ph");
+        const wave = $(".luna-al-wave"), win = $(".luna-al-win"), ovw = $(".luna-al-ovw");
+        const phW = aed.querySelector(".luna-al-ph");
+        // The visible part of the song: [v0, v1] seconds. Kept per song across
+        // re-renders, so a zoom survives every edit. Whole song until zoomed.
+        let view = _songView.get(card.file) || null;
+        const T0 = () => info?.duration || 0;
+        const vspan = () => (view ? view.v1 - view.v0 : T0());
+        const setView = (v0, span) => {
+            if (!Number.isFinite(v0) || !Number.isFinite(span)) return;
+            const T = T0(), sp = Math.max(Math.min(MIN_VIEW_S, T), Math.min(T, span));
+            const a0 = Math.max(0, Math.min(v0, T - sp));
+            view = sp >= T - 1e-6 ? null : { v0: a0, v1: a0 + sp };
+            if (view) _songView.set(card.file, view); else _songView.delete(card.file);
+        };
+        const V0 = () => (view ? view.v0 : 0), V1 = () => (view ? view.v1 : T0());
         const iSt = $(".st"), iDu = $(".du"), iEn = $(".en"), iSn = $(".sn");
         roleRow($(".rolehost"), "a", idx,
                 idx === 0 ? [["lock", "Lock to shot"], ["guide", "Guide at frame"], ["ref", "Reference"]]
@@ -2024,17 +2052,22 @@ function buildUI(node) {
                 // zoom, so getBoundingClientRect() is SCREEN pixels while style.left is the
                 // node's own pixels — at any zoom but 100% the window drifted off the pink
                 // selection it marks (Peter's screenshots, 2026-10-16).
-                win.style.left = `${Math.min(a, T) / T * 100}%`;
-                win.style.width = `${Math.max(0.4, Math.min(e, Math.max(0, T - a)) / T * 100)}%`;
+                // Everything is placed relative to the visible part [v0, v1]; the
+                // waveform clips whatever lies outside it.
+                const v0 = V0(), v1 = V1(), sp = v1 - v0;
+                const wEnd = Math.min(a + e, T);
+                win.style.left = `${(a - v0) / sp * 100}%`;
+                win.style.width = `${Math.max(0.4, (wEnd - a) / sp * 100)}%`;
                 $(".tag").textContent = byShot ? `shot ${n} · ${e.toFixed(2)} s` : `${e.toFixed(2)} s`;
                 const cv = wave.querySelector("canvas");
-                drawWave(cv, info, 0, T, a, a + e);
-                if (byShot && step() > 0) drawShotStrip(cv, T, N, n, e);
-                // Only the cut, not the whole window: a 24 s window "zoomed" was just the
-                // window again (Peter, 2026-10-16: "i dont really understand the principle").
-                const z0 = a - ZOOM_S, z1 = a + ZOOM_S;
-                drawWave(zoom.querySelector("canvas"), info, z0, z1, a, a + e, { grid: true, step: 1, mark: a });
-                $(".zr").textContent = `${clock(Math.max(0, z0))} – ${clock(z1)}`;
+                drawWave(cv, info, v0, v1, a, a + e, { grid: sp <= 20, step: sp <= 20 ? 1 : 2 });
+                if (byShot && step() > 0) drawShotStrip(cv, v0, sp, N, n, e);
+                ruler();
+                $(".zr").textContent = `${clock(v0)} – ${clock(v1)}`;
+                $(".zx").textContent = view ? `×${(T / sp).toFixed(1)}` : "whole song";
+                ovw.querySelector(".vw").style.cssText = `left:${v0 / T * 100}%;width:${sp / T * 100}%`;
+                ovw.querySelector(".wn").style.cssText = `left:${Math.min(a, T) / T * 100}%;width:${Math.max(0.3, (wEnd - a) / T * 100)}%`;
+                ovw.style.display = view ? "" : "none";
             }
             const last = _lastSong.get(node.id);
             let msg;
@@ -2058,13 +2091,13 @@ function buildUI(node) {
         }
 
         // Every shot's window as a thin strip along the top of the song; the current one in pink.
-        function drawShotStrip(cv, T, N, n, e) {
+        function drawShotStrip(cv, v0, sp, N, n, e) {
             if (!cv?.isConnected) return;
-            const g = cv.getContext("2d"), W = cv.getBoundingClientRect().width;
+            const g = cv.getContext("2d"), W = cv.getBoundingClientRect().width, T = T0();
             g.font = "9px Segoe UI, system-ui, sans-serif";
             for (let k = 1; k <= N; k++) {
                 const s = songStart + (k - 1) * step();
-                const x0 = s / T * W, x1 = Math.min(T, s + e) / T * W, cur = k === n;
+                const x0 = (s - v0) / sp * W, x1 = (Math.min(T, s + e) - v0) / sp * W, cur = k === n;
                 g.fillStyle = cur ? "#e07bb4" : (k % 2 ? "#3a3d48" : "#4f5361");
                 g.fillRect(x0, k % 2 ? 1 : 5, Math.max(1, x1 - x0), 3);
                 if (cur || k === 1 || k === N) { g.fillStyle = cur ? "#e07bb4" : "#8b8e99"; g.fillText(String(k), x0 + 1, 17); }
@@ -2072,14 +2105,15 @@ function buildUI(node) {
         }
 
         const ruler = () => {
-            const T = total(), r = $(".luna-al-ruler");
+            const r = $(".luna-al-ruler");
             r.replaceChildren();
-            if (!T) return;
-            const stp = T > 240 ? 60 : T > 90 ? 30 : T > 30 ? 10 : 5;
-            for (let t = 0; t <= T; t += stp) {
+            if (!T0()) return;
+            const v0 = V0(), v1 = V1(), sp = v1 - v0;
+            const stp = sp > 240 ? 60 : sp > 90 ? 30 : sp > 30 ? 10 : sp > 12 ? 5 : sp > 5 ? 1 : 0.5;
+            for (let t = Math.ceil(v0 / stp) * stp; t <= v1 + 1e-6; t += stp) {
                 const s = document.createElement("span");
-                s.style.left = `${t / T * 100}%`;
-                s.textContent = clock(t).replace(/\.\d+$/, "");
+                s.style.left = `${(t - v0) / sp * 100}%`;
+                s.textContent = stp < 1 ? clock(t).replace(/(\.\d)\d$/, "$1") : clock(t).replace(/\.\d+$/, "");
                 r.appendChild(s);
             }
         };
@@ -2091,7 +2125,9 @@ function buildUI(node) {
             // window is drawn where it really is and the status says if the song runs
             // out. Only a user's move is kept inside the song.
             $(".meta").textContent = `${clock(p.duration)} · ${(p.sampleRate / 1000).toFixed(1)} kHz · ${p.channels === 1 ? "mono" : p.channels === 2 ? "stereo" : p.channels + " ch"}`;
-            ruler();
+            // Keep the window in sight: if an edit (shot number, nudge) moved it out of
+            // the zoomed view, the view follows it at the same zoom.
+            if (view) { const a = winStart(); if (a < view.v0 || a > view.v1) setView(a - vspan() * 0.25, vspan()); }
             setTimeout(draw, 0);     // not rAF: a background tab never runs it
         }).catch(() => { $(".meta").textContent = "this file cannot be read by the browser"; });
         draw();
@@ -2110,7 +2146,7 @@ function buildUI(node) {
         });
         win.addEventListener("pointermove", (e) => {
             if (!drag) return;
-            const T = total(), dt = (e.clientX - drag.x) / wave.getBoundingClientRect().width * T;
+            const T = total(), dt = (e.clientX - drag.x) / wave.getBoundingClientRect().width * vspan();
             if (drag.edge === "m") setWin(drag.a + dt);
             else if (drag.edge === "l") {
                 start = Math.max(0, Math.min(drag.a + drag.d - 0.1, drag.a + dt));
@@ -2127,24 +2163,70 @@ function buildUI(node) {
         };
         win.addEventListener("pointerup", end);
         win.addEventListener("pointercancel", end);
-        // A click on the song outside the window centres the window there.
+        // On the song outside the window: a click centres the window there; a drag
+        // (when zoomed in) scrolls the song instead.
+        let pan = null;
         wave.addEventListener("pointerdown", (e) => {
             if (!info || win.contains(e.target)) return;
-            const r = wave.getBoundingClientRect();
-            setWin((e.clientX - r.left) / r.width * total() - eff() / 2);
-            commit();
+            pan = { x: e.clientX, v0: V0(), moved: false };
+            wave.setPointerCapture(e.pointerId);
         });
-        // The zoom strip pans the window finely: the song moves with the hand.
-        let zd = null;
-        zoom.addEventListener("pointerdown", (e) => { if (!info) return; zd = { x: e.clientX, a: winStart() }; zoom.setPointerCapture(e.pointerId); });
-        zoom.addEventListener("pointermove", (e) => {
-            if (!zd) return;
-            setWin(zd.a - (e.clientX - zd.x) / zoom.getBoundingClientRect().width * (2 * ZOOM_S));
+        wave.addEventListener("pointermove", (e) => {
+            if (!pan || !view || !wave.getBoundingClientRect().width) return;
+            const dx = e.clientX - pan.x;
+            if (!pan.moved && Math.abs(dx) < 4) return;
+            pan.moved = true;
+            setView(pan.v0 - dx / wave.getBoundingClientRect().width * vspan(), vspan());
             draw();
         });
-        const zEnd = () => { if (zd) { zd = null; commit(); } };
-        zoom.addEventListener("pointerup", zEnd);
-        zoom.addEventListener("pointercancel", zEnd);
+        wave.addEventListener("pointerup", (e) => {
+            if (!pan) return;
+            const p = pan;
+            pan = null;
+            if (p.moved) return;
+            const r = wave.getBoundingClientRect();
+            setWin(V0() + (e.clientX - r.left) / r.width * vspan() - eff() / 2);
+            commit();
+        });
+        wave.addEventListener("pointercancel", () => { pan = null; });
+        // Zoom: the buttons around the window's start (the cut), the wheel around the pointer.
+        const zoomAt = (focus, factor) => {
+            const sp = vspan(), ns = sp * factor;
+            if (!Number.isFinite(focus) || !(sp > 0)) return;   // not laid out yet: nothing to zoom
+            setView(focus - (focus - V0()) * (ns / sp), ns);
+            draw();
+        };
+        aed.querySelectorAll("[data-z]").forEach((b) => {
+            b.onclick = () => {
+                if (!info) return;
+                const a = winStart(), focus = a >= V0() && a <= V1() ? a : (V0() + V1()) / 2;
+                if (b.dataset.z === "fit") { setView(0, T0()); draw(); }
+                else zoomAt(focus, b.dataset.z === "in" ? 0.5 : 2);
+            };
+        });
+        wave.addEventListener("wheel", (e) => {
+            if (!info) return;
+            e.preventDefault();
+            const r = wave.getBoundingClientRect();
+            if (!r.width) return;
+            zoomAt(V0() + (e.clientX - r.left) / r.width * vspan(), e.deltaY < 0 ? 0.6 : 1 / 0.6);
+        }, { passive: false });
+        // The overview under a zoomed song: drag the light box to scroll, click to jump.
+        let od = null;
+        ovw.addEventListener("pointerdown", (e) => {
+            if (!info || !view) return;
+            const r = ovw.getBoundingClientRect(), t = (e.clientX - r.left) / r.width * T0();
+            if (t < V0() || t > V1()) { setView(t - vspan() / 2, vspan()); draw(); }
+            od = { x: e.clientX, v0: V0() };
+            ovw.setPointerCapture(e.pointerId);
+        });
+        ovw.addEventListener("pointermove", (e) => {
+            if (!od) return;
+            setView(od.v0 + (e.clientX - od.x) / ovw.getBoundingClientRect().width * T0(), vspan());
+            draw();
+        });
+        ovw.addEventListener("pointerup", () => { od = null; });
+        ovw.addEventListener("pointercancel", () => { od = null; });
 
         aed.querySelectorAll("[data-n]").forEach((b) => {
             b.onclick = () => { setWin(winStart() + nudge() * Number(b.dataset.n)); commit(); };
@@ -2186,10 +2268,9 @@ function buildUI(node) {
             const tick = () => {
                 const t = player.currentTime;
                 if (t >= b || player.paused) { stopPlay(); return; }
-                const T = total(), W = wave.getBoundingClientRect().width, Z = zoom.getBoundingClientRect().width;
-                phW.style.display = phZ.style.display = "block";
-                phW.style.left = `${t / T * 100}%`;
-                phZ.style.left = `${(t - (a - ZOOM_S)) / (2 * ZOOM_S) * 100}%`;
+                const inView = t >= V0() && t <= V1();
+                phW.style.display = inView ? "block" : "none";
+                phW.style.left = `${(t - V0()) / vspan() * 100}%`;
                 playRaf = requestAnimationFrame(tick);
             };
             playRaf = requestAnimationFrame(tick);
@@ -2527,7 +2608,9 @@ app.registerExtension({
             const CARD_MIN = 112, CARD_GAP = 8;
             const ROOT = 12 + 27 + 4 * 6;  // root padding, toolbar, gaps between bar/rows/timeline
             const SEC = 7 + 21 + 6;        // row border + padding, heading, gap to the cards
-            const EMPTY = 26, PANEL = 125, AUDIO_BASE = 315, VIDEO_BASE = 598, CONT = 250, TIMELINE = 194;
+            // AUDIO_BASE: song editor without its Position/Role/At-frame rows, measured 276 after the zoom
+            // tools replaced the strip (2026-10-16), + 16 kept for the overview bar shown when zoomed.
+            const EMPTY = 26, PANEL = 125, AUDIO_BASE = 292, VIDEO_BASE = 598, CONT = 250, TIMELINE = 194;
             const gridH = (n) => {
                 if (!n) return EMPTY;
                 const gw = Math.max(CARD_MIN, this.size[0] - GRID_SIDE);
