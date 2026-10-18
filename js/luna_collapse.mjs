@@ -34,7 +34,11 @@ const hit = (node, pos) => {
 
 // Widgets with an .element are DOM widgets — the player, the cards, the preview.
 // Those are the node's content, not its settings, so they never fold.
-const foldable = (node) => (node.widgets ?? []).filter((w) => !w.element);
+// Since frontend 1.55 the node's image preview is itself a canvas widget
+// ("$$canvas-image-preview", type IMAGE_PREVIEW) with no .element; the frontend's
+// own "$$" widgets are content too and never fold.
+const isContent = (w) => !!w.element || w.type === "IMAGE_PREVIEW" || String(w.name ?? "").startsWith("$$");
+const foldable = (node) => (node.widgets ?? []).filter((w) => !isContent(w));
 
 /**
  * Fold or unfold a node's settings.
