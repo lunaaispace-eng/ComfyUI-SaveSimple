@@ -20,6 +20,10 @@ its full-fat sibling for graphs that reference video and sound as well as stills
 Luna H3 Refs Out: turns that one `refs` link back into every H3 reference socket,
 so the loader can sit anywhere on the canvas behind a single wire.
 
+Luna Load Video: a video as a frame batch plus its sound and numbers, with a player
+on the node and a ⚙ panel. Derived from Load Video Pixaroma (MIT) — see the header
+of load_video.py.
+
 Luna Image Precision: casts an IMAGE batch to fp16 or fp32, to halve what a long
 frame batch costs downstream in a node that sizes its output from the input dtype.
 
@@ -57,6 +61,10 @@ from .h3_reference_loader import (
 from .h3_refs_out import (
     NODE_CLASS_MAPPINGS as _REFSOUT_CLASS_MAPPINGS,
     NODE_DISPLAY_NAME_MAPPINGS as _REFSOUT_DISPLAY_MAPPINGS,
+)
+from .load_video import (
+    NODE_CLASS_MAPPINGS as _LOADVIDEO_CLASS_MAPPINGS,
+    NODE_DISPLAY_NAME_MAPPINGS as _LOADVIDEO_DISPLAY_MAPPINGS,
 )
 
 NODE_CLASS_MAPPINGS.update(_VIDEO_CLASS_MAPPINGS)
@@ -108,6 +116,8 @@ NODE_CLASS_MAPPINGS.update(_H3LOADER_CLASS_MAPPINGS)
 NODE_DISPLAY_NAME_MAPPINGS.update(_H3LOADER_DISPLAY_MAPPINGS)
 NODE_CLASS_MAPPINGS.update(_REFSOUT_CLASS_MAPPINGS)
 NODE_DISPLAY_NAME_MAPPINGS.update(_REFSOUT_DISPLAY_MAPPINGS)
+NODE_CLASS_MAPPINGS.update(_LOADVIDEO_CLASS_MAPPINGS)
+NODE_DISPLAY_NAME_MAPPINGS.update(_LOADVIDEO_DISPLAY_MAPPINGS)
 
 WEB_DIRECTORY = "./js"
 

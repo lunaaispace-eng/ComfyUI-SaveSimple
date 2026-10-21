@@ -204,6 +204,91 @@ def clip_bytes(frames: int, width: int, height: int, precision: str = "fp16") ->
     return int(frames) * int(width) * int(height) * 3 * (2 if precision == "fp16" else 4)
 
 
+# --- Luna Load Video -----------------------------------------------------------
+# What a load will give, worked out from the file's probe BEFORE decoding, so the
+# node face can show it and the run can refuse an oversized clip up front.
+
+def grid_count(n: int, grid: str, available: int) -> int:
+    """Frame count on the grid: nearest to `n`, never past `available`, 0 if none fits.
+    Unlike grid_frames there is no 362 cap — a loader may hand H3 more than it was
+    trained on; the node says so instead of cutting silently."""
+    n, available = max(1, int(n)), int(available)
+    if grid == "h3":
+        lo = snap_frames_down(n) or FRAME_PLUS
+        hi = lo if lo == n else lo + FRAME_STEP
+        pick = hi if (n - lo) > (hi - n) else lo
+        return pick if pick <= available else snap_frames_down(available)
+    if grid == "ltx":
+        pick = max(1, int(round((n - 1) / 8.0)) * 8 + 1)
+        return pick if pick <= available else (((available - 1) // 8) * 8 + 1 if available >= 1 else 0)
+    return min(n, available)
+
+
+def plan_load(src: dict, start_s: float = 0.0, frames: int = 0, fps: float = 0.0,
+              width: int = 0, height: int = 0, fit: str = "crop", grid: str = "free",
+              nth: int = 1, precision: str = "fp32") -> dict:
+    """The load, decided from `src` (probe_media's dict). Raises ValueError with a
+    plain reason when nothing sensible can be loaded.
+
+    frames 0 = to the end of the file. fps 0 = the source's rate. width/height 0 =
+    keep; one of them set = scale to it, keeping the shape; both = fit that box.
+    grid "h3" plays at 24 fps and cuts to 17k+5, "ltx" to 8k+1."""
+    sw, sh = int(src.get("width") or 0), int(src.get("height") or 0)
+    if not sw or not sh:
+        raise ValueError("the frame size could not be read")
+    src_fps = float(src.get("fps") or 0.0) or float(FPS)
+    duration = float(src.get("duration") or 0.0)
+    start_s = max(0.0, float(start_s or 0.0))
+    fps = float(fps or 0.0)
+    if grid == "h3":
+        if fps not in (0.0, float(FPS)):
+            raise ValueError(f"the H3 grid plays at {FPS} fps; set fps to 0 or {FPS}")
+        fps = float(FPS)
+    out_fps = fps or src_fps
+    if duration and start_s >= duration:
+        raise ValueError(f"start {start_s:.2f} s is at or past the end of the file ({duration:.2f} s)")
+    available = int(math.floor((duration - start_s) * out_fps + 1e-6)) if duration else int(frames or 0)
+    if available <= 0:
+        raise ValueError("the file's length could not be read; set frames")
+    asked = int(frames or 0)
+    n = min(asked, available) if asked > 0 else available
+    if grid in ("h3", "ltx"):
+        n = grid_count(n, grid, available)
+        if n <= 0:
+            need = FRAME_PLUS if grid == "h3" else 1
+            raise ValueError(f"only {available} frame(s) from {start_s:.2f} s; the grid needs at least {need}")
+
+    w, h = int(width or 0), int(height or 0)
+    if w > 0 and h > 0:
+        size, ow, oh = ("box", w, h), w, h
+    elif w > 0:
+        oh = max(2, int(round(sh * w / float(sw))) // 2 * 2)
+        size, ow, fit = ("box", w, oh), w, "stretch"
+    elif h > 0:
+        ow = max(2, int(round(sw * h / float(sh))) // 2 * 2)
+        size, oh, fit = ("box", ow, h), h, "stretch"
+    else:
+        size, ow, oh = ("source",), sw, sh
+
+    nth = max(1, int(nth or 1))
+    delivered = -(-n // nth)
+    notes = []
+    if asked > available:
+        notes.append(f"asked {asked} frames, the file has {available} from {start_s:.2f} s")
+    elif asked > 0 and n != asked:
+        notes.append(f"asked {asked} frames, the grid gives {n}")
+    if grid == "h3" and n > TRAINED_MAX_FRAMES:
+        notes.append(f"{n} frames is past H3's trained {TRAINED_MAX_FRAMES}")
+    return {
+        "frames": n, "delivered": delivered, "fps": out_fps, "out_fps": out_fps / nth,
+        "seconds": n / out_fps, "size": size, "fit": fit, "width": ow, "height": oh,
+        "bytes": clip_bytes(delivered, ow, oh, precision), "available": available,
+        "source": {"width": sw, "height": sh, "fps": src_fps, "duration": duration,
+                   "audio": bool(src.get("audio"))},
+        "notes": notes,
+    }
+
+
 def probe_media(path: str) -> dict:
     """What a file holds, for the card UI: video size/fps/length, sound or not."""
     import av
@@ -225,7 +310,7 @@ def probe_media(path: str) -> dict:
 
 def decode_clip(path: str, start_s: float, frames: int, out_fps: float | None = None,
                 size: tuple = ("source",), fit: str = "crop", nth: int = 1,
-                precision: str = "fp16", grid: str = "free"):
+                precision: str = "fp16", grid: str = "free", who: str = "Luna Asset Loader"):
     """One video window -> ([N, H, W, 3] float, info).
 
     start_s: where the clip opens in the source. frames: how many output frames,
@@ -238,12 +323,12 @@ def decode_clip(path: str, start_s: float, frames: int, out_fps: float | None = 
     nth = max(1, int(nth))
     with av.open(path) as container:
         if not container.streams.video:
-            raise RuntimeError(f"[Luna Asset Loader] {os.path.basename(path)} has no video stream.")
+            raise RuntimeError(f"[{who}] {os.path.basename(path)} has no video stream.")
         stream = container.streams.video[0]
         stream.thread_type = "AUTO"
         sw, sh = int(stream.codec_context.width or 0), int(stream.codec_context.height or 0)
         if not sw or not sh:
-            raise RuntimeError(f"[Luna Asset Loader] Could not read the frame size of {os.path.basename(path)}.")
+            raise RuntimeError(f"[{who}] Could not read the frame size of {os.path.basename(path)}.")
         src_fps = float(stream.average_rate) if stream.average_rate else float(FPS)
         fps = float(out_fps) if out_fps else src_fps
 
@@ -306,14 +391,14 @@ def decode_clip(path: str, start_s: float, frames: int, out_fps: float | None = 
 
     if n_out == 0:
         raise RuntimeError(
-            f"[Luna Asset Loader] No frames in {os.path.basename(path)} from {start_s:.2f}s — "
+            f"[{who}] No frames in {os.path.basename(path)} from {start_s:.2f}s — "
             f"the start may be past the end of the clip.")
     got = targets
     if got < int(frames) and grid != "free":
         keep = snap_frames_down(got) if grid == "h3" else max(1, ((got - 1) // 8) * 8 + 1)
         if keep == 0:
             raise RuntimeError(
-                f"[Luna Asset Loader] {os.path.basename(path)} gave only {got} frame(s) from "
+                f"[{who}] {os.path.basename(path)} gave only {got} frame(s) from "
                 f"{start_s:.2f}s; MiniMax H3 needs at least {FRAME_PLUS}.")
         targets = keep
         n_out = min(n_out, -(-keep // nth))
