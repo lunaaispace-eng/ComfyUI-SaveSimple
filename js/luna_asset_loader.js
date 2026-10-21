@@ -340,7 +340,7 @@ const soundURL = (name) => `/view?filename=${encodeURIComponent(name)}&type=inpu
 /* ------------------------------------------------------------- sound cards */
 
 const MEDIA_WIDGET = "media_state";
-const WIRED_INPUTS = ["seconds", "shot", "width", "height"];   // sockets whose value the editors show
+const WIRED_INPUTS = ["seconds", "shot", "width", "height", "song_start"];   // sockets whose value the editors show
 const MAX_VIDEOS = 3;
 const VIDEO_EXT = /\.(mp4|mov|mkv|webm|avi|m4v|mpg|mpeg|wmv|flv)$/i;
 const isVideoFile = (f) => (f.type || "").startsWith("video/") || VIDEO_EXT.test(f.name || "");
@@ -518,17 +518,50 @@ function stepH3Frames(n, dir) {
 // Capped at 362 like media_io.snap_frames_nearest: the top of the trained range.
 const nearestH3Frames = (n) => Math.min(362, Math.round(snapH3Seconds(n / H3_FPS) * H3_FPS));
 
-// The numbers on the nodes feeding `seconds` and `shot`, as one string. Checked on
-// every draw, so editing the Float/Int upstream moves the window straight away.
-function wiredSignature(node) {
+// H3's frame grid as Luna MiniMax H3 Canvas applies it (h3_canvas.py align_frames):
+// round(duration x 24), then UP to the next 17k+5.
+const canvasSeconds = (d) => {
+    const n = Math.max(5, Math.round(Number(d) * 24));
+    return (n + (((5 - n) % 17) + 17) % 17) / 24;
+};
+
+// What an output on the node at the other end of a wire carries, when the frontend
+// can know it before a run: a node that says so itself (Luna Shot List's
+// lunaValueOf), the H3 Canvas's seconds (worked out from its duration widget), or a
+// plain number widget named like the output (a Float primitive's "value").
+function sourceValue(src, outName) {
+    if (!src) return null;
+    try {
+        if (typeof src.lunaValueOf === "function") {
+            const v = src.lunaValueOf(outName);
+            if (v !== undefined) return v;
+        }
+        if (src.type === "LunaMiniMaxH3Canvas" && outName === "seconds") {
+            const d = Number(widget(src, "duration_seconds")?.value);
+            return d > 0 ? canvasSeconds(d) : null;
+        }
+    } catch { return null; }
+    const w = src.widgets?.find((x) => x.name === outName) || src.widgets?.find((x) => x.name === "value");
+    return w && Number.isFinite(Number(w.value)) ? Number(w.value) : null;
+}
+
+function wiredSource(node, name) {
+    const inp = node.inputs?.find((x) => x.name === name);
+    if (!inp || inp.link == null) return null;
     const g = node.graph;
+    const l = g?.getLink?.(inp.link) ?? g?.links?.get?.(inp.link) ?? g?.links?.[inp.link];
+    const src = l && g.getNodeById(l.origin_id);
+    return src ? { src, out: src.outputs?.[l.origin_slot]?.name } : { src: null, out: null };
+}
+
+// The numbers on the nodes feeding the wired inputs, as one string. Checked on
+// every draw, so editing the Float/Int (or the Canvas, or the shot list) upstream
+// moves the window straight away.
+function wiredSignature(node) {
     return WIRED_INPUTS.map((name) => {
-        const inp = node.inputs?.find((x) => x.name === name);
-        if (!inp || inp.link == null) return "-";
-        const l = g?.getLink?.(inp.link) ?? g?.links?.get?.(inp.link) ?? g?.links?.[inp.link];
-        const src = l && g.getNodeById(l.origin_id);
-        const w = src?.widgets?.find((x) => x.name === src.outputs?.[l.origin_slot]?.name) || src?.widgets?.find((x) => x.name === "value");
-        return String(w?.value ?? "?");
+        const w = wiredSource(node, name);
+        if (!w) return "-";
+        return String(sourceValue(w.src, w.out) ?? "?");
     }).join("|");
 }
 const MAX_SOUNDS = 3;
@@ -1872,18 +1905,16 @@ function buildUI(node) {
     // last run's value stands in, and the editor says which it is showing.
     function wiredSeconds() { return wiredNumber("seconds", (last) => last?.wired && last.seconds > 0 ? last.seconds : null); }
     function wiredShot() { return wiredNumber("shot", (last) => last?.shot > 0 ? last.shot : null); }
-    function wiredNumber(name, fromLast) {
-        const inp = node.inputs?.find((x) => x.name === name);
-        if (!inp || inp.link == null) return { wired: false, value: null, from: "" };
+    // song_start may be 0 (a scene at the very top of the song).
+    function wiredSongStart() { return wiredNumber("song_start", (last) => last?.start_wired ? last.start : null, 0); }
+    function wiredNumber(name, fromLast, min = Number.MIN_VALUE) {
         let value = null, from = "the wire";
+        const ws = wiredSource(node, name);
+        if (!ws) return { wired: false, value: null, from: "" };
         try {
-            const g = node.graph;
-            const l = g.getLink?.(inp.link) ?? g.links?.get?.(inp.link) ?? g.links?.[inp.link];
-            const src = l && g.getNodeById(l.origin_id);
-            const out = src?.outputs?.[l.origin_slot];
-            from = src?.title || from;
-            const w = src?.widgets?.find((x) => x.name === out?.name) || src?.widgets?.find((x) => x.name === "value");
-            if (w && Number.isFinite(Number(w.value)) && Number(w.value) > 0) value = Number(w.value);
+            from = ws.src?.title || from;
+            const v = sourceValue(ws.src, ws.out);
+            if (v != null && Number.isFinite(Number(v)) && Number(v) >= min) value = Number(v);
         } catch { /* graph mid-change: fall back to the last run */ }
         if (value == null) {
             const v = fromLast(_lastSong.get(node.id));
@@ -1928,10 +1959,14 @@ function buildUI(node) {
         // Snap a duration to the target's clip lengths; nudge by the ⚙ step.
         const snapSeconds = (sec) => { const T = targetOf(media), fps = T.fps || H3_FPS; return gridFrames(sec * fps, T.grid) / fps; };
         const nudge = () => Number(settingsOf(media).audio.nudge) || 0.1;
-        const byShot = card.position === "shot";
+        // A wired song_start (Luna Shot List) places the window; the card's start and
+        // its shot-number mode stand aside, exactly as in Python.
+        const wss = wiredSongStart(), placed = wss.wired;
+        const byShot = card.position === "shot" && !placed;
         let start = Number(card.start) || 0, songStart = Number(card.song_start) || 0;
         let dur = Number(card.duration) || 0, info = null;
         const ws = wiredSeconds(), wsh = wiredShot();
+        const placedNote = () => notice(`The start comes from the song_start input (${wss.from}).`);
         const shotNo = () => Math.max(1, Math.round(wsh.wired && wsh.value > 0 ? wsh.value : Number(card.shot) || 1));
 
         aed.innerHTML = `
@@ -1983,7 +2018,7 @@ function buildUI(node) {
             : (dur > 0 ? dur : (byShot ? 0 : Math.max(0, total() - start)));
         const step = () => shotStep(eff(), Number(card.overlap) || 0);
         // The window this run uses. In shot mode it is derived from where shot 1 begins.
-        const winStart = () => byShot ? songStart + (shotNo() - 1) * step() : start;
+        const winStart = () => placed ? (wss.value ?? start) : byShot ? songStart + (shotNo() - 1) * step() : start;
         const clampWin = (t) => Math.max(byShot ? (shotNo() - 1) * Math.max(0, step()) : 0,
             Math.min(t, Math.max(0, total() - Math.min(eff(), total()))));
         // Moving the window: free mode moves it; shot mode moves every shot together.
@@ -2018,6 +2053,7 @@ function buildUI(node) {
         });
         $(".snaprow").style.display = ws.wired ? "none" : "";
         $(".shotrow").style.display = $(".ovrow").style.display = byShot ? "" : "none";
+        $(".pos").parentElement.style.display = placed ? "none" : "";
         $(".stl").textContent = byShot ? "Song start" : "Start";
 
         function commit(patch = {}) {
@@ -2032,7 +2068,9 @@ function buildUI(node) {
         function draw() {
             const e = eff(), T = total(), a = winStart(), n = shotNo();
             const N = byShot && T ? shotCount(T, songStart, e, Number(card.overlap) || 0) : 0;
-            iSt.value = clock(byShot ? songStart : start);
+            iSt.value = clock(byShot ? songStart : placed ? a : start);
+            iSt.readOnly = placed;
+            iSt.classList.toggle("lockd", placed);
             iDu.value = `${e.toFixed(2)} s`;
             iEn.value = `${clock(a)} – ${clock(a + e)}`;
             iDu.readOnly = ws.wired;
@@ -2046,7 +2084,7 @@ function buildUI(node) {
             $(".sl").textContent = wsh.wired
                 ? (wsh.value > 0 ? `🔒 from ${wsh.from}` : `🔒 set by ${wsh.from} — known after a run`)
                 : (N ? `of ${N}` : "");
-            win.classList.toggle("locked", ws.wired);
+            win.classList.toggle("locked", ws.wired || placed);
             if (T) {
                 // Percent, never measured pixels: ComfyUI scales DOM widgets with the canvas
                 // zoom, so getBoundingClientRect() is SCREEN pixels while style.left is the
@@ -2079,6 +2117,10 @@ function buildUI(node) {
                 msg = `Shot <b>${n}</b>${N ? ` of ${N}` : ""} uses the song from <b>${clock(a)}</b> to <b>${clock(a + e)}</b>`
                     + (n > 1 && Number(card.overlap) ? `, sharing its first ${(Number(card.overlap) / H3_FPS).toFixed(2)} s with shot ${n - 1}` : "")
                     + `. Each shot starts ${step().toFixed(2)} s after the one before. Change the shot number${wsh.wired ? "" : " (or wire <b>shot</b>)"} and the window follows; dragging moves every shot together.`;
+            else if (placed)
+                msg = wss.value != null
+                    ? `🔒 The start comes from the <b>song_start</b> input (${wss.from}): ${clock(a)}–${clock(a + e)}. Change the scene there and the window follows.`
+                    : `🔒 The start comes from the <b>song_start</b> input (${wss.from}) — known after a run.`;
             else msg = ws.wired
                 ? `The duration comes from the <b>seconds</b> input, so the song always matches the shot. Move the window or type a start.`
                 : `Drag the window to choose the part; drag its edges or type Start and Duration.`;
@@ -2138,6 +2180,7 @@ function buildUI(node) {
         win.addEventListener("pointerdown", (e) => {
             if (!info) return;
             const edge = e.target.classList.contains("h") ? (e.target.classList.contains("l") ? "l" : "r") : "m";
+            if (placed && edge !== "r") { placedNote(); return; }
             if (edge !== "m" && ws.wired) { notice("The duration comes from the seconds input."); return; }
             if (edge === "l" && byShot) { notice("In shot mode the window starts where the shot number puts it."); return; }
             drag = { edge, x: e.clientX, a: winStart(), d: eff() };
@@ -2184,6 +2227,7 @@ function buildUI(node) {
             const p = pan;
             pan = null;
             if (p.moved) return;
+            if (placed) { placedNote(); return; }
             const r = wave.getBoundingClientRect();
             setWin(V0() + (e.clientX - r.left) / r.width * vspan() - eff() / 2);
             commit();
@@ -2229,7 +2273,7 @@ function buildUI(node) {
         ovw.addEventListener("pointercancel", () => { od = null; });
 
         aed.querySelectorAll("[data-n]").forEach((b) => {
-            b.onclick = () => { setWin(winStart() + nudge() * Number(b.dataset.n)); commit(); };
+            b.onclick = () => { if (placed) { placedNote(); return; } setWin(winStart() + nudge() * Number(b.dataset.n)); commit(); };
         });
         aed.querySelectorAll("[data-s]").forEach((b) => {
             b.onclick = () => {
@@ -2238,6 +2282,7 @@ function buildUI(node) {
             };
         });
         iSt.onchange = () => {
+            if (placed) { draw(); return; }
             const v = parseClock(iSt.value);
             if (v != null) { if (byShot) songStart = Math.max(0, v); else start = clampWin(v); }
             commit();

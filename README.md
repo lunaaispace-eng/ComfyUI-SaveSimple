@@ -1,7 +1,8 @@
 # ComfyUI-SaveSimple
 
-Seven deliberately small nodes for ComfyUI: save an image, save a video, load a
-set of reference images once instead of once per consumer, feed MiniMax H3 all
+Eight deliberately small nodes for ComfyUI: save an image, save a video, load a
+set of reference images once instead of once per consumer, plan scenes of
+different lengths over one song, feed MiniMax H3 all
 four of its reference families down one wire, cast a frame batch to fp16, and
 strip the 2px VAE pixel grid off a decoded image. Each exists because the
 alternatives carried more settings than the job needs.
@@ -11,6 +12,7 @@ alternatives carried more settings than the job needs.
 | `Luna Save Image` | `Luna/Save` | `SaveImageSimple` |
 | `Luna Save Video` | `Luna/Save` | `SaveVideoSimple` |
 | `Luna Asset Loader` | `Luna/Load` | `LunaAssetLoader` |
+| `Luna Shot List` | `Luna/Plan` | `LunaShotList` |
 | `Luna H3 Reference Loader` | `Luna/Load` | `LunaH3ReferenceLoader` |
 | `Luna H3 Refs Out` | `Luna/Load` | `LunaH3RefsOut` |
 | `Luna Image Precision` | `Luna/Image` | `LunaImagePrecision` |
@@ -291,6 +293,17 @@ so sound and picture line up at every cut.
   together. A thin strip on top of the song shows every shot's window.
 - A shot number past the end of the song stops the run with the shot count.
 
+Every shot the same length is the limit of this mode. For **scenes of different
+lengths**, use **Luna Shot List** (below) and wire its **`song_start`** into the
+Asset Loader's `song_start` input and its **`seconds`** into `seconds`: the window
+then sits exactly where that scene's line in the script puts it, and the editor
+locks Start and says where it comes from. A wired `song_start` wins over the
+card's Start and over By shot number.
+
+With **Luna MiniMax H3 Canvas** wired into `seconds` (its `seconds` output), the
+editor knows the shot length before a run: it reads the Canvas's duration and
+rounds it to H3's grid the same way the Canvas does.
+
 ## Video cards — clips
 
 Upload a clip (mp4, mov, mkv, webm …) and it becomes an orange video card, `V1`
@@ -390,6 +403,48 @@ Malformed JSON falls back to defaults rather than failing the run.
 A missing file **raises** with its filename rather than substituting a blank
 image. Silently dropping `<Picture 2>` would renumber every reference after it
 and mislabel the whole prompt.
+
+---
+
+# Luna Shot List
+
+Scenes of different lengths over one song, from a script — one scene per run.
+
+```
+# one scene per line:  start | length | prompt
+overlap: 22
+0:12.00 | 5.17 | the singer walks into the light
+        | 124f | close-up on the guitar
+0:30.5  | 3s   | wide shot, the crowd
+```
+
+- **start** — song time (m:ss.xx or seconds). Empty = straight after the previous
+  scene, sharing `overlap` frames with it, so a continuation lines up at the cut.
+- **length** — seconds (`5.17`, `3s`) or frames (`124f`); lands on the grid's
+  nearest count (H3 17k+5 at 24 fps, LTX 8k+1 at 25 fps, or free).
+- **prompt** — the rest of the line, out on `prompt`.
+- `overlap: N` and `start: m:ss` on a line of their own apply to the whole script;
+  `#` starts a note. A JSON list (`[{"start": 12, "seconds": 5.17, "prompt": "…"},
+  {"frames": 124}]`) is read too, for tools.
+
+The **table** under the script shows every scene's start, end, length on the grid
+and the frames it shares with the one before; edit a cell (the line in the script
+is rewritten, comments stay), **+ scene** adds one, ✕ removes one, and clicking a
+scene's number makes it the one the next run makes.
+
+**Automation:** set the control under `scene` to **increment** and queue once per
+scene; or wire the script from another node (a song analysis, a text loader). A
+scene past the end stops the run and says how many there are.
+
+| Output | |
+| --- | --- |
+| `scene` / `scenes` | this scene's number, and how many there are |
+| `frames` | this scene's frame count on the grid — wire to the H3 node's `length` |
+| `seconds` | `frames / fps` — wire to Luna Asset Loader `seconds` (or Canvas `duration_seconds`) |
+| `song_start` | where in the song this scene starts — wire to Luna Asset Loader `song_start` |
+| `prompt` | this scene's text |
+| `overlap` | frames shared with the scene before (0 for scene 1 or after a gap) |
+| `info` | one line about the scene |
 
 ---
 

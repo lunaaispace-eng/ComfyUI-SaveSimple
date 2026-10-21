@@ -434,6 +434,11 @@ class LunaAssetLoader:
                 "previous_frames": ("IMAGE", {
                     "tooltip": "The previous shot's frames, for a continuation whose source is 'Input': its last frames open this shot, so the motion carries on across the cut.",
                 }),
+                # Added LAST, like every input since media_state: nothing saved shifts.
+                "song_start": ("FLOAT", {
+                    "forceInput": True,
+                    "tooltip": "Where in the song this shot starts, in seconds — from Luna Shot List, for scenes of different lengths. Wired, it wins over the sound card's Start and over 'By shot number'; the window's length still comes from seconds (or the card).",
+                }),
             },
         }
 
@@ -482,7 +487,7 @@ class LunaAssetLoader:
         return True
 
     def load(self, image_paths, image_count, asset_state="", media_state="", seconds=None, shot=None,
-             width=None, height=None, previous_frames=None):
+             width=None, height=None, previous_frames=None, song_start=None):
         paths = _split_paths(image_paths)
         media = _parse_media(media_state)
         cards, clips = media["audio"], media["video"]
@@ -493,7 +498,7 @@ class LunaAssetLoader:
         shot_len = shot_frames(seconds, media["shot_frames"])
 
         # --- load everything -------------------------------------------------
-        audio, song, song_line = self._song(cards, seconds, shot)
+        audio, song, song_line = self._song(cards, seconds, shot, song_start)
         settings = media["settings"]
         decoded = self._clips(clips, width, height, settings)
         extra_sounds = self._sounds(cards)
@@ -656,8 +661,11 @@ class LunaAssetLoader:
         return out
 
     @staticmethod
-    def _song(cards, seconds, shot=None):
-        """Sound card 1 -> (AUDIO or None, info dict or None, one brief line)."""
+    def _song(cards, seconds, shot=None, song_start=None):
+        """Sound card 1 -> (AUDIO or None, info dict or None, one brief line).
+
+        A wired song_start (Luna Shot List) places the window itself; the card's own
+        start and its shot-number mode then stand aside."""
         if not cards:
             return None, None, ""
         c = cards[0]
@@ -667,7 +675,18 @@ class LunaAssetLoader:
         wired = seconds is not None and float(seconds) > 0
         want = float(seconds) if wired else c["duration"]
         start, describe, n = c["start"], None, None
-        if c["position"] == "shot":
+        placed = song_start is not None
+        if placed:
+            start = max(0.0, float(song_start))
+            if want <= 0:
+                raise RuntimeError(
+                    "[Luna Asset Loader] song_start is wired but the shot has no length: wire "
+                    "`seconds` too, or give the sound card a Duration.")
+
+            def describe(total_s):
+                return (f"[Luna Asset Loader] song_start puts this shot at {_clock(start)}, after "
+                        f"{c['file']} ends ({_clock(total_s)}). Check the scene's start in the shot list.")
+        elif c["position"] == "shot":
             if want <= 0:
                 raise RuntimeError(
                     "[Luna Asset Loader] 'By shot number' needs a shot length: wire `seconds` "
@@ -686,8 +705,9 @@ class LunaAssetLoader:
                         f"{_clock(c['song_start'])}.")
         audio, info = load_audio_window(path, start, want, c["fill"], describe)
         info["wired"] = wired
+        info["start_wired"] = placed
         line = (f"Song: {info['name']} {_clock(info['start'])}-{_clock(info['start'] + info['seconds'])} "
-                f"({info['seconds']:.2f} s).")
+                f"({info['seconds']:.2f} s{', placed by song_start' if placed else ''}).")
         if n is not None:
             info["shot"] = n
             info["shots"] = song_shot_count(info["total"], c["song_start"], want, c["overlap"])
