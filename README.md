@@ -1,8 +1,8 @@
 # ComfyUI-SaveSimple
 
-Eight deliberately small nodes for ComfyUI: save an image, save a video, load a
-set of reference images once instead of once per consumer, plan scenes of
-different lengths over one song, feed MiniMax H3 all
+Nine deliberately small nodes for ComfyUI: save an image, save a video, load a
+set of reference images once instead of once per consumer, load a video as
+frames, plan scenes of different lengths over one song, feed MiniMax H3 all
 four of its reference families down one wire, cast a frame batch to fp16, and
 strip the 2px VAE pixel grid off a decoded image. Each exists because the
 alternatives carried more settings than the job needs.
@@ -13,6 +13,7 @@ alternatives carried more settings than the job needs.
 | `Luna Save Video` | `Luna/Save` | `SaveVideoSimple` |
 | `Luna Asset Loader` | `Luna/Load` | `LunaAssetLoader` |
 | `Luna Shot List` | `Luna/Plan` | `LunaShotList` |
+| `Luna Load Video` | `Luna/Load` | `LunaLoadVideo` |
 | `Luna H3 Reference Loader` | `Luna/Load` | `LunaH3ReferenceLoader` |
 | `Luna H3 Refs Out` | `Luna/Load` | `LunaH3RefsOut` |
 | `Luna Image Precision` | `Luna/Image` | `LunaImagePrecision` |
@@ -445,6 +446,43 @@ scene past the end stops the run and says how many there are.
 | `prompt` | this scene's text |
 | `overlap` | frames shared with the scene before (0 for scene 1 or after a gap) |
 | `info` | one line about the scene |
+
+---
+
+# Luna Load Video
+
+Load a video as a batch of frames, with its sound and its numbers. Upload a file
+(button or drag onto the node) or pick one from the list, and it plays on the node
+straight away. The line under the player says what a run will load — frames, frame
+rate, size, length and memory — before you run, worked out by the same code the run
+uses.
+
+**On the node** (the chevron folds these away, the player stays):
+
+| Setting | Does |
+| --- | --- |
+| `start` | Seconds into the file where loading starts. The sound starts there too. |
+| `frames` | How many frames, counted at the frame rate below. `0` = to the end. |
+| `fps` | Load at this rate by dropping or repeating frames, so motion stays real-time. `0` = the file's own. |
+| `width` / `height` | `0` = keep. One set = scale to it, keeping the shape. Both set = fit that box by `fit`. |
+| `fit` | `crop` fills the box and cuts the overflow, `pad` fits inside with black bars, `stretch` distorts. |
+
+**In ⚙** (the cog on the title bar opens the settings panel beside the node):
+
+| Setting | Does |
+| --- | --- |
+| Frame grid | `Free`; `H3` = 24 fps and 5, 22, 39 … frames (17k+5); `LTX` = 1, 9, 17 … (8k+1). The count lands on the nearest the grid allows, never past the end of the file. |
+| Every Nth | Keep every Nth frame; the `fps` output divides by N. |
+| Sound | `Keep` = the sound for exactly the loaded frames; `Drop` = none. |
+| Precision | `fp32` (what every node expects) or `fp16` (half the memory). |
+| Memory cap | A load that would need more is refused before decoding, with the numbers. Default 6 GB. |
+
+**Outputs** — the same seven as Load Video Pixaroma, in the same order:
+`video_frames`, `audio` (None when there is no sound or it is dropped), `frame_count`,
+`fps`, `width`, `height`, `duration`.
+
+Derived from Load Video Pixaroma (ComfyUI-Pixaroma, MIT); the change list is in the
+header of `load_video.py`.
 
 ---
 

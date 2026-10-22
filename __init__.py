@@ -24,6 +24,10 @@ Luna Shot List: scenes of different lengths over one song, from a script (text a
 person or a song analysis writes); one scene per run, its song start and length
 wired into the Asset Loader. Rules in shot_plan.py.
 
+Luna Load Video: a video as a frame batch plus its sound and numbers, with a player
+on the node and a ⚙ panel. Derived from Load Video Pixaroma (MIT) — see the header
+of load_video.py.
+
 Luna Image Precision: casts an IMAGE batch to fp16 or fp32, to halve what a long
 frame batch costs downstream in a node that sizes its output from the input dtype.
 
@@ -65,6 +69,10 @@ from .h3_refs_out import (
 from .shot_list import (
     NODE_CLASS_MAPPINGS as _SHOTLIST_CLASS_MAPPINGS,
     NODE_DISPLAY_NAME_MAPPINGS as _SHOTLIST_DISPLAY_MAPPINGS,
+)
+from .load_video import (
+    NODE_CLASS_MAPPINGS as _LOADVIDEO_CLASS_MAPPINGS,
+    NODE_DISPLAY_NAME_MAPPINGS as _LOADVIDEO_DISPLAY_MAPPINGS,
 )
 
 NODE_CLASS_MAPPINGS.update(_VIDEO_CLASS_MAPPINGS)
@@ -118,6 +126,8 @@ NODE_CLASS_MAPPINGS.update(_REFSOUT_CLASS_MAPPINGS)
 NODE_DISPLAY_NAME_MAPPINGS.update(_REFSOUT_DISPLAY_MAPPINGS)
 NODE_CLASS_MAPPINGS.update(_SHOTLIST_CLASS_MAPPINGS)
 NODE_DISPLAY_NAME_MAPPINGS.update(_SHOTLIST_DISPLAY_MAPPINGS)
+NODE_CLASS_MAPPINGS.update(_LOADVIDEO_CLASS_MAPPINGS)
+NODE_DISPLAY_NAME_MAPPINGS.update(_LOADVIDEO_DISPLAY_MAPPINGS)
 
 WEB_DIRECTORY = "./js"
 
