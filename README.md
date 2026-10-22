@@ -24,8 +24,9 @@ alternatives carried more settings than the job needs.
 > documented, which is the authoritative description until this file catches up.
 
 Every node carries an **ⓘ** on its title bar with its own inputs and outputs
-documented, and the two save nodes carry a **chevron** that folds their settings
-away, leaving the sockets and the preview.
+documented. The save nodes, Luna Load Video and Luna Shot List also carry a
+**chevron** that folds their settings away, leaving the sockets and what the node
+shows (the preview, the player, the script and its table).
 
 > **`Luna MiniMax H3 Canvas` has moved.** It now lives in
 > [ComfyUI-LunaMiniMaxH3](https://github.com/lunaaispace-eng/ComfyUI-LunaMiniMaxH3)
@@ -216,8 +217,6 @@ One ordered set of reference images, loaded once and fed to every consumer.
 Built for MiniMax H3, which wants each reference at its own aspect ratio while
 prompt writers want a single batch — so the loader emits both and the picture is
 only loaded once.
-
-See [LUNA_ASSET_LOADER.md](LUNA_ASSET_LOADER.md) for the full description.
 
 The per-image resize state is modelled on
 [ComfyUI-Pixaroma](https://github.com/pixaroma/ComfyUI-Pixaroma) by pixaroma
