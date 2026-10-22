@@ -10,7 +10,7 @@ import sys
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from media_io import grid_count, plan_load  # noqa: E402
+from media_io import clean_path, download_name, folder_videos, grid_count, is_url, plan_load  # noqa: E402
 
 HD30 = {"width": 1920, "height": 1080, "fps": 30.0, "duration": 12.0, "audio": True}
 
@@ -88,6 +88,27 @@ class PlanLoadTests(unittest.TestCase):
     def test_unknown_size_refused(self):
         with self.assertRaises(ValueError):
             plan_load({"width": 0, "height": 0, "fps": 30, "duration": 3})
+
+
+
+class SourceTests(unittest.TestCase):
+    def test_url_and_path(self):
+        self.assertTrue(is_url(" https://x.org/a.mp4"))
+        self.assertFalse(is_url("D:/clips/a.mp4"))
+        self.assertEqual(clean_path(' "D:\clips\a b.mp4" '), "D:\clips\a b.mp4")
+
+    def test_folder_order_and_count(self):
+        names = ["clip10.mp4", "notes.txt", "clip2.MOV", "clip1.mp4", "cover.png"]
+        self.assertEqual(folder_videos(names), ["clip1.mp4", "clip2.MOV", "clip10.mp4"])
+        self.assertEqual(folder_videos(names, 2), ["clip1.mp4", "clip2.MOV"])
+
+    def test_download_name(self):
+        a = download_name("https://cdn.x.org/v/My%20Clip.mp4?sig=1")
+        self.assertTrue(a.startswith("My_Clip_") and a.endswith(".mp4"))
+        self.assertEqual(a, download_name("https://cdn.x.org/v/My%20Clip.mp4?sig=1"))
+        self.assertNotEqual(a, download_name("https://cdn.x.org/v/My%20Clip.mp4?sig=2"))
+        self.assertTrue(download_name("https://x.org/watch?v=1").endswith(".mp4"))
+        self.assertNotIn("..", download_name("https://x.org/../../a.mp4"))
 
 
 if __name__ == "__main__":

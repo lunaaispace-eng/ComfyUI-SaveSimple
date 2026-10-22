@@ -205,6 +205,46 @@ def clip_bytes(frames: int, width: int, height: int, precision: str = "fp16") ->
 
 
 # --- Luna Load Video -----------------------------------------------------------
+# Where the videos come from: a picked/uploaded file, a typed path or web link, or
+# a folder. These helpers are pure so the rules are tested without disk or network.
+
+def is_url(text: str) -> bool:
+    return isinstance(text, str) and text.strip().lower().startswith(("http://", "https://"))
+
+
+def clean_path(text: str) -> str:
+    """A pasted path as Windows hands it over: quotes and spaces off the ends."""
+    return (text or "").strip().strip('"').strip("'").strip()
+
+
+def _natural(name: str):
+    """'clip2' before 'clip10': digit runs compare as numbers."""
+    import re
+    return [int(t) if t.isdigit() else t.lower() for t in re.split(r"(\d+)", name)]
+
+
+def folder_videos(names, count: int = 0) -> list:
+    """The video files among `names`, in natural name order, the first `count` (0 = all)."""
+    vids = sorted((n for n in names if n.rsplit(".", 1)[-1].lower() in VIDEO_EXTS and "." in n), key=_natural)
+    return vids[:count] if int(count or 0) > 0 else vids
+
+
+def download_name(url: str) -> str:
+    """A stable, safe file name for a downloaded link: its own name plus a short hash
+    of the whole URL, so two links with the same file name never overwrite each other
+    and the same link is downloaded once."""
+    import hashlib
+    import re
+    from urllib.parse import unquote, urlparse
+    path = unquote(urlparse(url.strip()).path)
+    base = os.path.basename(path) or "video"
+    stem, dot, ext = base.rpartition(".")
+    if not dot or ext.lower() not in VIDEO_EXTS:
+        stem, ext = base, "mp4"
+    stem = re.sub(r"[^A-Za-z0-9._-]+", "_", stem).strip("._")[:60] or "video"
+    tag = hashlib.sha1(url.strip().encode("utf-8")).hexdigest()[:10]
+    return f"{stem}_{tag}.{ext.lower()}"
+
 # What a load will give, worked out from the file's probe BEFORE decoding, so the
 # node face can show it and the run can refuse an oversized clip up front.
 

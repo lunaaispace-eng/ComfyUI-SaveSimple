@@ -19,6 +19,12 @@ const NODE = "LunaLoadVideo";
 const PANEL = ["frame_grid", "every_nth", "audio", "precision", "memory_cap_gb"];
 const DEFAULTS = { frame_grid: "free", every_nth: 1, audio: "keep", precision: "fp32", memory_cap_gb: 6 };
 const PLAN_KEYS = ["video", "start", "frames", "fps", "width", "height", "fit", ...PANEL];
+const SOURCE_KEYS = ["source", "path", "folder", "video_count"];
+// Which widgets each source shows on the face (the rest of the source widgets hide).
+const BY_SOURCE = { "upload": ["video", "upload_video"], "path / URL": ["path"], "folder": ["folder", "video_count"] };
+// The widget order before the sources were added (2026-10-22): a save made without
+// named values is restored through these names instead of by position.
+const OLD_ORDER = ["video", "start", "frames", "fps", "width", "height", "fit", ...PANEL];
 const GEAR_R = 7;
 const GEAR_INSET = 56;      // ⓘ at size[0] - 16, chevron at - 36
 const PLAYER_MIN = 140;     // video area, px at 100 % zoom
@@ -86,22 +92,58 @@ const clock = (s) => {
 };
 
 function signature(node) {
-    return PLAN_KEYS.map((k) => String(W(node, k)?.value ?? "")).join("|");
+    return [...SOURCE_KEYS, ...PLAN_KEYS].map((k) => String(W(node, k)?.value ?? "")).join("|");
+}
+
+// What the face can show for the chosen source. A path inside ComfyUI's input folder
+// (relative) previews like an upload; a web link plays straight from the web; an
+// absolute path or a folder is only read by the run.
+const cleanPath = (t) => String(t ?? "").trim().replace(/^["']+|["']+$/g, "").trim();
+function current(node) {
+    const source = W(node, "source")?.value || "upload";
+    if (source === "path / URL") {
+        const t = cleanPath(W(node, "path")?.value);
+        if (!t) return { kind: "none", msg: "No path or link yet — type one in path." };
+        if (/^https?:\/\//i.test(t)) return { kind: "url", url: t };
+        if (/^([a-z]:|[\\/]|~)/i.test(t)) return { kind: "local", path: t };
+        return { kind: "file", file: t.replace(/\\/g, "/") };
+    }
+    if (source === "folder") {
+        const f = cleanPath(W(node, "folder")?.value), n = Number(W(node, "video_count")?.value) || 0;
+        return f ? { kind: "folder", folder: f, count: n } : { kind: "none", msg: "No folder yet — type one in folder." };
+    }
+    const v = W(node, "video")?.value;
+    return v ? { kind: "file", file: v } : { kind: "none", msg: "No video — upload one or pick one from the list." };
 }
 
 // The plan line: what a run would load, from the same Python the run uses.
 async function refreshPlan(node) {
     const ui = node._lunaLV;
     if (!ui) return;
-    const file = W(node, "video")?.value;
+    const cur = current(node);
     const sig = signature(node);
     ui.sig = sig;
-    if (!file) {
-        ui.src.textContent = "";
-        ui.plan.className = "luna-lv-plan";
-        ui.plan.textContent = "";
+    ui.plan.className = "luna-lv-plan";
+    const lastRun = () => {
+        if (!ui.last?.length) return;
+        const d = document.createElement("span");
+        d.className = "n";
+        d.textContent = ` · last run: ${ui.last.length > 1 ? `${ui.last.length} videos — ` : ""}${ui.last.join("; ")}`;
+        ui.plan.append(d);
+    };
+    if (cur.kind !== "file") {
+        ui.src.textContent = cur.kind === "url" ? cur.url : cur.kind === "local" ? cur.path
+            : cur.kind === "folder" ? `${cur.folder}${cur.count ? ` · first ${cur.count} video${cur.count === 1 ? "" : "s"}` : " · every video"}` : "";
+        ui.plan.textContent = {
+            url: "Loads from the web link at run time (downloaded once into input/luna_downloads).",
+            local: "Loads this file at run time; there is no preview for files outside ComfyUI's input folder.",
+            folder: "Loads the folder's videos in name order at run time; every node after this one runs once per video.",
+            none: "",
+        }[cur.kind];
+        lastRun();
         return;
     }
+    const file = cur.file;
     const q = new URLSearchParams({ file });
     for (const k of PLAN_KEYS.slice(1)) q.set(k, String(W(node, k)?.value ?? ""));
     let r;
@@ -134,15 +176,20 @@ async function refreshPlan(node) {
         s.textContent = ` · ${n}`;
         ui.plan.append(s);
     }
+    lastRun();
 }
 
 function setSource(node) {
     const ui = node._lunaLV;
-    const file = W(node, "video")?.value;
-    if (!ui || ui.file === file) return;
-    ui.file = file;
-    if (file) {
-        ui.video.src = viewURL(file);
+    if (!ui) return;
+    const cur = current(node);
+    const src = cur.kind === "file" ? viewURL(cur.file) : cur.kind === "url" ? cur.url : "";
+    ui.empty.textContent = cur.kind === "local" ? "This file plays after it is loaded — no preview outside the input folder."
+        : cur.kind === "folder" ? "A folder: its videos load at run time." : (cur.msg || "");
+    if (ui.file === src) return;
+    ui.file = src;
+    if (src) {
+        ui.video.src = src;
         ui.video.hidden = false;
         ui.empty.hidden = true;
     } else {
@@ -150,6 +197,27 @@ function setSource(node) {
         ui.video.load();
         ui.video.hidden = true;
         ui.empty.hidden = false;
+    }
+}
+
+// Show only the widgets the chosen source uses. While the settings are folded the
+// chevron owns `hidden`, so the wanted state goes where it restores from.
+function showSourceWidgets(node) {
+    const source = W(node, "source")?.value || "upload";
+    const want = new Set(BY_SOURCE[source] || BY_SOURCE.upload);
+    const folded = !!node.properties?.lunaSettingsCollapsed;
+    let changed = false;
+    for (const name of Object.values(BY_SOURCE).flat()) {
+        const w = W(node, name);
+        if (!w) continue;
+        const hide = !want.has(name);
+        if (folded) { if (w._lunaWasHidden !== hide) { w._lunaWasHidden = hide; } continue; }
+        if (!!w.hidden !== hide) { w.hidden = hide; changed = true; }
+    }
+    if (changed) {
+        // Arithmetic: the widget stack plus the player, as computeSize adds them up.
+        node.setSize([node.size[0], node.computeSize()[1]]);
+        node.setDirtyCanvas(true, true);
     }
 }
 
@@ -161,6 +229,7 @@ function watch(node) {
     const sig = signature(node);
     if (sig === ui.seen) return;
     ui.seen = sig;
+    showSourceWidgets(node);
     setSource(node);
     clearTimeout(ui.timer);
     ui.timer = setTimeout(() => refreshPlan(node), 250);
@@ -402,6 +471,7 @@ app.registerExtension({
     async beforeRegisterNodeDef(nodeType, nodeData) {
         if (nodeData?.name !== NODE) return;
         const P = nodeType.prototype;
+        nodeData.fallbackWidgetsValuesNames = OLD_ORDER;
 
         const onCreated = P.onNodeCreated;
         P.onNodeCreated = function () {
@@ -470,8 +540,12 @@ app.registerExtension({
         const onExecuted = P.onExecuted;
         P.onExecuted = function (msg) {
             const r = onExecuted?.apply(this, arguments);
-            const line = msg?.luna_load_video?.[0];
-            if (line && this._lunaLV) this._lunaLV.src.title = `Last run: ${line}`;
+            const lines = msg?.luna_load_video;
+            if (Array.isArray(lines) && lines.length && this._lunaLV) {
+                this._lunaLV.last = lines;
+                this._lunaLV.src.title = `Last run:\n${lines.join("\n")}`;
+                refreshPlan(this);
+            }
             return r;
         };
 

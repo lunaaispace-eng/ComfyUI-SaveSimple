@@ -452,7 +452,19 @@ scene past the end stops the run and says how many there are.
 
 Load a video as a batch of frames, with its sound and its numbers. Upload a file
 (button or drag onto the node) or pick one from the list, and it plays on the node
-straight away. The line under the player says what a run will load — frames, frame
+straight away.
+
+**`source`** picks where videos come from (the face shows only that source's fields):
+
+| Source | Uses |
+| --- | --- |
+| `upload` | the file picked in the list, the upload button, or a file dragged onto the node |
+| `path / URL` | `path`: a file on this PC (`D:\clips\a.mp4`, quotes from *Copy as path* are fine; a relative path is read from the input folder) or an http(s) link to a video file, downloaded once into `input/luna_downloads`. Wire a STRING into `path` to drive it from another node. |
+| `folder` | `folder` (absolute, or relative to the input folder) and `video_count` (0 = all): its videos in name order, `clip2` before `clip10`. Every output is then a list — **everything after this node runs once per video**, each at its own size and length. The memory cap counts all of them together. |
+
+A path inside the input folder and a web link preview on the node; an absolute path
+or a folder is read by the run, and the line under the player then lists what each
+run loaded. The line under the player says what a run will load — frames, frame
 rate, size, length and memory — before you run, worked out by the same code the run
 uses.
 
@@ -478,7 +490,9 @@ uses.
 
 **Outputs** — the same seven as Load Video Pixaroma, in the same order:
 `video_frames`, `audio` (None when there is no sound or it is dropped), `frame_count`,
-`fps`, `width`, `height`, `duration`.
+`fps`, `width`, `height`, `duration` — plus **`video`**: the file itself, untouched, as
+ComfyUI's VIDEO (whole file, original size, frame rate and sound; start, frames, fps
+and size do not apply), for Save Video, Get Video Components and other VIDEO nodes.
 
 Derived from Load Video Pixaroma (ComfyUI-Pixaroma, MIT); the change list is in the
 header of `load_video.py`.
